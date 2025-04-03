@@ -27,22 +27,19 @@ ge-proton-updater
 ```
 
 ### As an `apt-up`/`pac-up` Hook
-1. Copy to the post-hook directory:
+1. Copy to the `apt-up` post-hook directory:
 ```bash
-￼
 sudo curl -sL https://raw.githubusercontent.com/yourusername/ge-proton-updater/main/ge-proton-updater.sh -o /etc/apt-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/apt-up.d/post.d/50-ge-proton
 ```
 
-Or for pac-up:
+Or for `pac-up`:
 ```bash
-￼
 sudo curl -sL https://raw.githubusercontent.com/yourusername/ge-proton-updater/main/ge-proton-updater.sh -o /etc/pac-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/pac-up.d/post.d/50-ge-proton
 ```
 2. (Optional) Set a custom target in `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
-￼
 export GE_PROTON_TARGET="/home/youruser/.steam/steam/compatibilitytools.d"
 ```
 
@@ -69,27 +66,28 @@ After a new GE-Proton install, Steam needs to be told to use it:
 ## Multi-User, Multi-Steam Systems
 For systems with multiple Steam users, adapt the script as follows:
 
-- **Admin And Gamer Aren't The Same User:** Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
+### Admin And Gamer Aren't The Same User:
+Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
   - In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
-
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
 
   - Run sudo apt-up or sudo pac-up.
 
-- **Standalone, Multiple Gamers:** Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
+### Standalone, Multiple Gamers:
+Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
 ```bash
-￼
 GE_PROTON_TARGET=/home/gamer1/.steam/steam/compatibilitytools.d ge-proton-updater
 GE_PROTON_TARGET=/home/gamer2/.steam/steam/compatibilitytools.d ge-proton-updater
 ...
 ```
 
-- **Called By A Hook In An Update Script, Multiple Gamers:** Use multiple copies of the script with hard-coded targets:
+### Called By A Hook In An Update Script, Multiple Gamers:
+Use multiple copies of the script with hard-coded targets:
+
 1. Copy and edit the script for each user:
 ```bash
-￼
 sudo cp ge-proton-updater.sh /etc/apt-up.d/post.d/ge-proton-updater-gamer1
 sudo chmod +x /etc/apt-up.d/post.d/ge-proton-updater-gamer1
 # Edit ge-proton-updater-gamer1, uncomment and set: GE_PROTON_TARGET="/home/gamer1/.steam/steam/compatibilitytools.d"
