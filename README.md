@@ -73,7 +73,7 @@ Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
 
-  - Run sudo apt-up or sudo pac-up.
+  - Run `sudo apt-up` or `sudo pac-up`.
 
 ### Standalone, Multiple Gamers:
 Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
@@ -98,6 +98,7 @@ sudo chmod +x /etc/apt-up.d/post.d/ge-proton-updater-gamer2
 ```
 
 2. Run parent script, e.g. `sudo apt-up` or `sudo pac-up`. Each hook updates its respective user’s GE-Proton individually.
+
   - Be sure you don’t set `GE_PROTON_TARGET` in `apt-up.conf`/`pac-up.conf` in this case, as it’d override the script-specific targets.
 
 ## License
