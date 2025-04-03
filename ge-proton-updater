@@ -1,0 +1,318 @@
+#!/bin/bash
+
+# GE-Proton update script for Linux desktops
+# Installs latest GE-Proton to Steam's compatibilitytools.d directory
+#
+# Usage Notes:
+# - Ideal as a post-hook for apt-up or pac-up (e.g., /etc/apt-up.d/post.d/50-ge-proton or /etc/pac-up.d/post.d/50-ge-proton)
+# - Set GE_PROTON_TARGET to override the install directory:
+#   - In-script: GE_PROTON_TARGET="/custom/path" (uncomment below)
+#   - Export: export GE_PROTON_TARGET="/home/user/.steam/steam/compatibilitytools.d"
+#   - CLI: GE_PROTON_TARGET="/path" ./50-ge-proton
+# - Use --force-root to allow installation to /root/.steam/... as root
+# - Designed for apt-up/pac-up hooks or standalone use
+
+set -euo pipefail  # Exit on errors, unset vars, and pipe failures
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'  # No color
+
+# GitHub API URL for latest GE-Proton release
+GH_API_URL="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
+
+# Uncomment to set a default GE_PROTON_TARGET (optional)
+# GE_PROTON_TARGET="/custom/path/to/compatibilitytools.d"
+
+# Use apt-up's cecho if available, else fallback
+if declare -f cecho >/dev/null 2>&1; then
+  log() { cecho "$1" "$2"; }
+else
+  log() { echo -e "${2:-$NC}$1${NC}"; }
+fi
+
+# Function to create a secure temp directory
+make_secure_temp() {
+  if command -v mktemp >/dev/null 2>&1; then
+    mktemp -d /tmp/ge-proton-update.XXXXXX
+  else
+    local base_dir="${TMPDIR:-/tmp}"
+    local template="ge-proton-update.XXXXXX"
+    local dir
+    local rand
+    for _ in {1..10}; do
+      rand=$(od -An -N4 -tx /dev/urandom | tr -d ' \n')
+      dir="$base_dir/${template/XXXXXX/$rand}"
+      if mkdir -m 700 "$dir" 2>/dev/null; then
+        echo "$dir"
+        return 0
+      fi
+    done
+    log "Error: Failed to create secure temp directory" "$RED"
+    exit 1
+  fi
+}
+
+# Temp directory for downloads
+TMP_DIR=$(make_secure_temp)
+
+# Function to detect the effective user
+get_effective_user() {
+  if [[ "$EUID" -eq 0 ]]; then
+    if [[ -v SUDO_USER && -n "$SUDO_USER" ]]; then
+      echo "$SUDO_USER"
+    else
+      echo "root"
+    fi
+  else
+    echo "$USER"
+  fi
+}
+
+# Function to detect Steam directory or use override
+find_steam_dir() {
+  local user="$1" home_dir compat_dir
+  
+  if [[ -v GE_PROTON_TARGET && -n "$GE_PROTON_TARGET" ]]; then
+    if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
+      if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+        sudo -u "$user" mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
+          log "Error: Cannot create $GE_PROTON_TARGET as $user" "$RED"
+          exit 1
+        }
+      else
+        mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
+          log "Error: Cannot create $GE_PROTON_TARGET" "$RED"
+          exit 1
+        }
+      fi
+      echo "$GE_PROTON_TARGET"
+      return 0
+    else
+      log "Warning: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable" "$RED"
+    fi
+  fi
+  
+  home_dir=$(getent passwd "$user" | cut -d: -f6)
+  local steam_base_paths=(
+    "$home_dir/.steam/steam"              # Most common native Steam
+    "$home_dir/.steam"                    # Older native setups
+    "$home_dir/.var/app/com.valvesoftware.Steam/data/Steam"  # Flatpak
+  )
+  
+  for base in "${steam_base_paths[@]}"; do
+    compat_dir="$base/compatibilitytools.d"
+    if [[ -d "$compat_dir" ]]; then
+      echo "$compat_dir"
+      return 0
+    fi
+  done
+  
+  for base in "${steam_base_paths[@]}"; do
+    if [[ -d "$base/steamapps" ]]; then
+      compat_dir="$base/compatibilitytools.d"
+      if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+        sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
+          log "Error: Cannot create $compat_dir as $user" "$RED"
+          exit 1
+        }
+      else
+        mkdir -p "$compat_dir" 2>/dev/null || {
+          log "Error: Cannot create $compat_dir" "$RED"
+          exit 1
+        }
+      fi
+      echo "$compat_dir"
+      return 0
+    fi
+  done
+  
+  default_base="$home_dir/.steam/steam"
+  compat_dir="$default_base/compatibilitytools.d"
+  if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+    sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
+      log "Error: Cannot create $compat_dir as $user" "$RED"
+      exit 1
+    }
+  else
+    mkdir -p "$compat_dir" 2>/dev/null || {
+      log "Error: Cannot create $compat_dir" "$RED"
+      exit 1
+    }
+  fi
+  echo "$compat_dir"
+}
+
+# Function to get latest GE-Proton version and URLs
+get_latest_release() {
+  local release_info
+  release_info=$(curl -s "$GH_API_URL")
+  version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+')
+  tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz')
+  checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum')
+  if [[ -z "$version" || -z "$tarball_url" || -z "$checksum_url" ]]; then
+    log "Error: Failed to fetch release info from GitHub API" "$RED"
+    exit 1
+  fi
+  log "Latest GE-Proton version: $version" "$NC"
+}
+
+# Function to download and verify
+download_and_verify() {
+  local tarball_name checksum_name
+  tarball_name=$(basename "$tarball_url")
+  checksum_name=$(basename "$checksum_url")
+  
+  log "Downloading $tarball_name..." "$NC"
+  curl -sL "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
+    log "Error: Download failed" "$RED"
+    exit 1
+  }
+  curl -sL "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
+    log "Error: Checksum download failed" "$RED"
+    exit 1
+  }
+  
+  log "Verifying checksum..." "$NC"
+  cd "$TMP_DIR"
+  sha512sum -c "$checksum_name" >/dev/null 2>&1 || {
+    log "Error: Checksum verification failed" "$RED"
+    exit 1
+  }
+  echo "$tarball_name"
+}
+
+# Function to install as the target user
+install_ge_proton() {
+  local user="$1" target_dir="$2" tarball_name="$3" version="$4"
+  local install_path="$target_dir/$version"
+  
+  if [[ -d "$install_path" ]]; then
+    log "GE-Proton $version already installed at $install_path" "$NC"
+    return 1
+  fi
+  
+  log "Extracting to $install_path as user $user..." "$NC"
+  mkdir -p "$target_dir" 2>/dev/null || {
+    log "Error: Cannot create $target_dir" "$RED"
+    exit 1
+  }
+  if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
+    sudo -u "$user" tar -xzf "$TMP_DIR/$tarball_name" -C "$target_dir" 2>/dev/null || {
+      log "Error: Extraction failed" "$RED"
+      exit 1
+    }
+    chown -R "$user:$user" "$install_path" 2>/dev/null || {
+      log "Warning: Failed to set ownership of $install_path to $user" "$RED"
+    }
+  else
+    tar -xzf "$TMP_DIR/$tarball_name" -C "$target_dir" 2>/dev/null || {
+      log "Error: Extraction failed" "$RED"
+      exit 1
+    }
+  fi
+  log "GE-Proton $version installed successfully" "$GREEN"
+  log "Note: Steam requires a restart to detect GE-Proton $version. In Steam: Steam > Settings > Compatibility > Ensure 'Enable Steam Play for all other titles' is checked > Set 'Run other titles with' to 'GE-Proton $version'." "$NC"
+  return 0
+}
+
+# Function to clean up old GE-Proton versions
+cleanup_old_versions() {
+  local user="$1" target_dir="$2" latest_version="$3"
+  local versions_to_keep=2
+  
+  log "Cleaning up old GE-Proton versions..." "$NC"
+  local versions
+  versions=$(ls -d "$target_dir"/GE-Proton* 2>/dev/null | sort -V | head -n -$versions_to_keep)
+  
+  if [[ -z "$versions" ]]; then
+    log "No old versions to clean up." "$NC"
+    return
+  fi
+  
+  for old_version in $versions; do
+    if [[ "$old_version" != "$target_dir/$latest_version" ]]; then
+      log "Removing $old_version..." "$NC"
+      if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
+        sudo -u "$user" rm -rf "$old_version" 2>/dev/null || {
+          log "Warning: Failed to remove $old_version" "$RED"
+        }
+      else
+        rm -rf "$old_version" 2>/dev/null || {
+          log "Warning: Failed to remove $old_version" "$RED"
+        }
+      fi
+    fi
+  done
+  log "Cleanup complete." "$NC"
+}
+
+# Check for --force-root flag
+FORCE_ROOT=0
+for arg in "$@"; do
+  if [[ "$arg" == "--force-root" ]]; then
+    FORCE_ROOT=1
+    break
+  fi
+done
+
+# Main execution
+log "Checking for GE-Proton updates..." "$NC"
+
+# Detect the effective user
+EFFECTIVE_USER=$(get_effective_user)
+
+# Check GE_PROTON_TARGET first
+TARGET_SET=0
+if [[ -v GE_PROTON_TARGET && -n "$GE_PROTON_TARGET" ]]; then
+  if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
+    COMPAT_DIR="$GE_PROTON_TARGET"
+    TARGET_SET=1
+    log "Using overridden Steam directory: $COMPAT_DIR" "$NC"
+  else
+    log "Warning: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable, falling back to auto-detection" "$RED"
+  fi
+fi
+
+# Handle root-only case if no valid GE_PROTON_TARGET
+if [[ "$TARGET_SET" -eq 0 && "$EFFECTIVE_USER" == "root" && "$EUID" -eq 0 && ! -v SUDO_USER ]]; then
+  if [[ "$FORCE_ROOT" -eq 1 ]]; then
+    log "Installing to root's Steam dir with --force-root" "$NC"
+  else
+    log "Skipping GE-Proton update: Running as root without sudo user, --force-root, or valid GE_PROTON_TARGET" "$RED"
+    rm -rf "$TMP_DIR"
+    exit 0
+  fi
+fi
+
+# Detect Steam directory if not overridden
+if [[ "$TARGET_SET" -eq 0 ]]; then
+  COMPAT_DIR=$(find_steam_dir "$EFFECTIVE_USER")
+  log "Using Steam directory: $COMPAT_DIR" "$NC"
+fi
+
+# Get latest release info
+get_latest_release
+
+# Check if latest version is already installed, install if not
+INSTALL_OCCURRED=0
+if install_ge_proton "$EFFECTIVE_USER" "$COMPAT_DIR" "$(basename "$tarball_url")" "$version"; then
+  INSTALL_OCCURRED=1
+else
+  log "No installation needed." "$NC"
+fi
+
+# Download and verify only if installation occurred
+if [[ "$INSTALL_OCCURRED" -eq 1 ]]; then
+  download_and_verify
+fi
+
+# Clean up old versions
+cleanup_old_versions "$EFFECTIVE_USER" "$COMPAT_DIR" "$version"
+
+# Cleanup temp dir
+rm -rf "$TMP_DIR"
+log "Done!" "$NC"
+
+exit 0
