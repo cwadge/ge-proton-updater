@@ -21,7 +21,7 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 ## Installation
 ### Standalone
 ```bash
-curl -sL https://raw.githubusercontent.com/yourusername/ge-proton-updater/main/ge-proton-updater.sh -o /usr/local/bin/ge-proton-updater
+curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /usr/local/bin/ge-proton-updater
 chmod +x /usr/local/bin/ge-proton-updater
 ge-proton-updater
 ```
@@ -29,13 +29,13 @@ ge-proton-updater
 ### As an `apt-up`/`pac-up` Hook
 1. Copy to the `apt-up` post-hook directory:
 ```bash
-sudo curl -sL https://raw.githubusercontent.com/yourusername/ge-proton-updater/main/ge-proton-updater.sh -o /etc/apt-up.d/post.d/50-ge-proton
+sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /etc/apt-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/apt-up.d/post.d/50-ge-proton
 ```
 
 Or for `pac-up`:
 ```bash
-sudo curl -sL https://raw.githubusercontent.com/yourusername/ge-proton-updater/main/ge-proton-updater.sh -o /etc/pac-up.d/post.d/50-ge-proton
+sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /etc/pac-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/pac-up.d/post.d/50-ge-proton
 ```
 2. (Optional) Set a custom target in `/etc/apt-up.conf` or `/etc/pac-up.conf`:
