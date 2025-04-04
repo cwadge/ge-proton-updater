@@ -230,7 +230,7 @@ get_latest_release() {
 		debug_log "API response: $release_info"
 		exit 1
 	fi
-	log "Latest GE-Proton version: $version" "$NC"
+	log "Latest version: $version" "$NC"
 	debug_log "Tarball URL: $tarball_url"
 	debug_log "Checksum URL: $checksum_url"
 }
@@ -308,7 +308,7 @@ install_ge_proton() {
 	local install_path="$target_dir/$version"
 
 	if [[ -d "$install_path" ]]; then
-		log "GE-Proton $version already installed at $install_path" "$NC"
+		log "$version already installed at $install_path" "$NC"
 		return 0
 	fi
 
@@ -392,8 +392,9 @@ install_ge_proton() {
 											log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
 										fi
 
-										log "GE-Proton $version installed successfully" "$GREEN"
-										log "Note: Steam requires a restart to detect GE-Proton $version. In Steam: Steam > Settings > Compatibility > Ensure 'Enable Steam Play for all other titles' is checked > Set 'Run other titles with' to '$version'." "$NC"
+										log "$version installed successfully" "$GREEN"
+										log "Note: Steam requires a restart to detect $version."
+										log "In Steam: Steam > Settings > Compatibility > Ensure 'Enable Steam Play for all other titles' is checked > Set 'Run other titles with' to '$version'." "$NC"
 										return 0
 									}
 
@@ -528,7 +529,7 @@ trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "W
 get_latest_release
 
 if [[ -d "$COMPAT_DIR/$version" ]]; then
-	log "GE-Proton $version already installed at $COMPAT_DIR/$version" "$NC"
+	log "$version already installed at $COMPAT_DIR/$version" "$NC"
 	INSTALL_NEEDED=0
 else
 	INSTALL_NEEDED=1
