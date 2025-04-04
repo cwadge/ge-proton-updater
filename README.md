@@ -70,8 +70,8 @@ After a new GE-Proton install, Steam needs to be told to use it:
 For systems with multiple Steam users, adapt the script as follows:
 
 ### Admin And Gamer Aren't The Same User:
-Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
-1. In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
+1. Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path,
+e.g. edit `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
