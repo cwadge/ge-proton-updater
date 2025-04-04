@@ -1,10 +1,10 @@
 # GE-Proton Updater
 
-A Bash script to automatically download, verify, and install the latest [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) ([GloriousEggroll](https://x.com/GloriousEggroll)'s Proton fork) for Steam on Linux desktops / laptops. Keeps your gaming compatibility tools up-to-date with minimal fuss.
+A Bash script to automatically download, verify, and install the latest [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) ([GloriousEggroll](https://x.com/GloriousEggroll)'s excellent Proton fork) for Steam on Linux desktops / laptops. Keeps your gaming compatibility tools up-to-date with minimal hassle.
 
 - **Standalone**: Runs anywhere to update GE-Proton.
 - **Hook-Friendly**: Perfect as a post-update script for [apt-up](https://github.com/cwadge/apt-up) or [pac-up](https://github.com/cwadge/pac-up).
-- **Gaming Focus**: Tailored for Steam users on Linux.
+- **Efficient**: Nothing happens unless it needs to.
 
 ## Features
 - Fetches the latest GE-Proton from GitHub.
