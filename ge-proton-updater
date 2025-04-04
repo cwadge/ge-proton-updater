@@ -10,6 +10,7 @@
 #   - Export: export GE_PROTON_TARGET="/home/user/.steam/steam/compatibilitytools.d"
 #   - CLI: GE_PROTON_TARGET="/path" ./50-ge-proton
 # - Use --force-root to allow installation to /root/.steam/... as root
+# - Use --debug for verbose output
 # - Designed for apt-up/pac-up hooks or standalone use
 
 set -euo pipefail  # Exit on errors, unset vars, and pipe failures
@@ -17,6 +18,7 @@ set -euo pipefail  # Exit on errors, unset vars, and pipe failures
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m'  # No color
 
 # GitHub API URL for latest GE-Proton release
@@ -25,12 +27,25 @@ GH_API_URL="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releas
 # Uncomment to set a default GE_PROTON_TARGET (optional)
 # GE_PROTON_TARGET="/custom/path/to/compatibilitytools.d"
 
-# Use apt-up's cecho if available, else fallback
+# Debug mode flag
+DEBUG=0
+
+# Minimum files expected after extraction (configurable via env var)
+MIN_FILES=${MIN_FILES:-5}
+
+# Use apt-up's cecho if available, else fallback to printf
 if declare -f cecho >/dev/null 2>&1; then
   log() { cecho "$1" "$2"; }
 else
-  log() { echo -e "${2:-$NC}$1${NC}"; }
+  log() { printf "%b%s%b\n" "${2:-$NC}" "$1" "$NC" >&2; }
 fi
+
+# Debug logging function
+debug_log() {
+  if [[ "$DEBUG" -eq 1 ]]; then
+    log "DEBUG: $1" "$YELLOW"
+  fi
+}
 
 # Function to create a secure temp directory
 make_secure_temp() {
@@ -54,9 +69,6 @@ make_secure_temp() {
   fi
 }
 
-# Temp directory for downloads
-TMP_DIR=$(make_secure_temp)
-
 # Function to detect the effective user
 get_effective_user() {
   if [[ "$EUID" -eq 0 ]]; then
@@ -73,7 +85,14 @@ get_effective_user() {
 # Function to detect Steam directory or use override
 find_steam_dir() {
   local user="$1" home_dir compat_dir
-  
+
+  if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+    if ! sudo -u "$user" true 2>/dev/null; then
+      log "Error: Cannot switch to user $user via sudo" "$RED"
+      exit 1
+    fi
+  fi
+
   if [[ -v GE_PROTON_TARGET && -n "$GE_PROTON_TARGET" ]]; then
     if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
       if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
@@ -93,14 +112,14 @@ find_steam_dir() {
       log "Warning: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable" "$RED"
     fi
   fi
-  
+
   home_dir=$(getent passwd "$user" | cut -d: -f6)
   local steam_base_paths=(
     "$home_dir/.steam/steam"              # Most common native Steam
     "$home_dir/.steam"                    # Older native setups
-    "$home_dir/.var/app/com.valvesoftware.Steam/data/Steam"  # Flatpak
+    "$home_dir/.var/app/com.valvesoftware.Steam/data/Steam"  # Flatpak (may vary)
   )
-  
+
   for base in "${steam_base_paths[@]}"; do
     compat_dir="$base/compatibilitytools.d"
     if [[ -d "$compat_dir" ]]; then
@@ -108,7 +127,7 @@ find_steam_dir() {
       return 0
     fi
   done
-  
+
   for base in "${steam_base_paths[@]}"; do
     if [[ -d "$base/steamapps" ]]; then
       compat_dir="$base/compatibilitytools.d"
@@ -127,7 +146,7 @@ find_steam_dir() {
       return 0
     fi
   done
-  
+
   default_base="$home_dir/.steam/steam"
   compat_dir="$default_base/compatibilitytools.d"
   if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
@@ -146,16 +165,44 @@ find_steam_dir() {
 
 # Function to get latest GE-Proton version and URLs
 get_latest_release() {
-  local release_info
-  release_info=$(curl -s "$GH_API_URL")
-  version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+')
-  tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz')
-  checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum')
+  local release_info http_code
+  debug_log "Fetching latest release info from GitHub API"
+  release_info=$(curl -s -w "%{http_code}" "$GH_API_URL" -o "$TMP_DIR/release.json")
+  http_code="${release_info: -3}"
+  release_info=$(cat "$TMP_DIR/release.json")
+  if [[ "$http_code" -eq 403 ]]; then
+    log "Error: GitHub API rate limit exceeded" "$RED"
+    exit 1
+  elif [[ "$http_code" -ne 200 ]]; then
+    log "Error: GitHub API request failed with HTTP $http_code" "$RED"
+    debug_log "API response: $release_info"
+    exit 1
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    version=$(echo "$release_info" | jq -r '.tag_name')
+    tarball_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url')
+    checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".sha512sum")) | .browser_download_url')
+  else
+    if grep -P >/dev/null 2>&1 <<< ""; then
+      version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+')
+      tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz')
+      checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum')
+    else
+      version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4)
+      tarball_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | cut -d'"' -f4)
+      checksum_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' | cut -d'"' -f4)
+    fi
+  fi
+
   if [[ -z "$version" || -z "$tarball_url" || -z "$checksum_url" ]]; then
-    log "Error: Failed to fetch release info from GitHub API" "$RED"
+    log "Error: Failed to parse release info from GitHub API" "$RED"
+    debug_log "API response: $release_info"
     exit 1
   fi
   log "Latest GE-Proton version: $version" "$NC"
+  debug_log "Tarball URL: $tarball_url"
+  debug_log "Checksum URL: $checksum_url"
 }
 
 # Function to download and verify
@@ -163,23 +210,65 @@ download_and_verify() {
   local tarball_name checksum_name
   tarball_name=$(basename "$tarball_url")
   checksum_name=$(basename "$checksum_url")
-  
+
   log "Downloading $tarball_name..." "$NC"
-  curl -sL "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
-    log "Error: Download failed" "$RED"
+  debug_log "Download location: $TMP_DIR/$tarball_name"
+
+  if command -v wget >/dev/null 2>&1; then
+    debug_log "Using wget for download"
+    wget -q --show-progress -O "$TMP_DIR/$tarball_name" "$tarball_url" || {
+      log "Error: Download failed with wget" "$RED"
+      if [[ "$DEBUG" -eq 1 ]]; then
+        wget -O "$TMP_DIR/$tarball_name" "$tarball_url"
+      fi
+      exit 1
+    }
+    wget -q -O "$TMP_DIR/$checksum_name" "$checksum_url" || {
+      log "Error: Checksum download failed with wget" "$RED"
+      exit 1
+    }
+  else
+    debug_log "Using curl for download"
+    curl -s -L "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
+      log "Error: Download failed with curl" "$RED"
+      if [[ "$DEBUG" -eq 1 ]]; then
+        curl -v -L "$tarball_url" -o "$TMP_DIR/$tarball_name"
+      fi
+      exit 1
+    }
+    curl -s -L "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
+      log "Error: Checksum download failed with curl" "$RED"
+      exit 1
+    }
+  fi
+
+  if [[ ! -s "$TMP_DIR/$tarball_name" ]]; then
+    log "Error: Downloaded tarball is empty or not found at $TMP_DIR/$tarball_name" "$RED"
     exit 1
-  }
-  curl -sL "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
-    log "Error: Checksum download failed" "$RED"
+  fi
+
+  if [[ ! -s "$TMP_DIR/$checksum_name" ]]; then
+    log "Error: Downloaded checksum file is empty or not found at $TMP_DIR/$checksum_name" "$RED"
     exit 1
-  }
-  
+  fi
+
   log "Verifying checksum..." "$NC"
   cd "$TMP_DIR"
-  sha512sum -c "$checksum_name" >/dev/null 2>&1 || {
+  debug_log "Checksum file content: $(cat "$checksum_name")"
+  debug_log "Calculated SHA512: $(sha512sum "$tarball_name")"
+
+  if sha512sum -c "$checksum_name" >/dev/null 2>&1; then
+    log "Checksum verification passed" "$GREEN"
+  else
     log "Error: Checksum verification failed" "$RED"
+    debug_log "Expected vs actual:"
+    if [[ "$DEBUG" -eq 1 ]]; then
+      sha512sum -c "$checksum_name" || true
+    fi
     exit 1
-  }
+  fi
+
+  debug_log "Tarball exists after verification: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
   echo "$tarball_name"
 }
 
@@ -187,31 +276,92 @@ download_and_verify() {
 install_ge_proton() {
   local user="$1" target_dir="$2" tarball_name="$3" version="$4"
   local install_path="$target_dir/$version"
-  
+
   if [[ -d "$install_path" ]]; then
     log "GE-Proton $version already installed at $install_path" "$NC"
-    return 1
+    return 0
   fi
-  
-  log "Extracting to $install_path as user $user..." "$NC"
+
+  debug_log "Creating target directory: $target_dir"
   mkdir -p "$target_dir" 2>/dev/null || {
     log "Error: Cannot create $target_dir" "$RED"
     exit 1
   }
+
+  local tarball_path="$TMP_DIR/$tarball_name"
+  debug_log "Checking tarball before extraction: $tarball_path"
+  debug_log "Tarball details: $(ls -lh "$tarball_path" 2>/dev/null || echo 'Not found')"
+  if [[ ! -s "$tarball_path" ]]; then
+    log "Error: Tarball not found or empty at $tarball_path" "$RED"
+    exit 1
+  fi
+
+  local tarball_size
+  tarball_size=$(stat -c%s "$tarball_path" 2>/dev/null ||
+                 stat -f%z "$tarball_path" 2>/dev/null ||
+                 wc -c < "$tarball_path")
+  debug_log "Tarball size: $tarball_size bytes"
+
+  if [[ "$tarball_size" -lt 1000000 ]]; then
+    log "Warning: Tarball size ($tarball_size bytes) seems unusually small" "$YELLOW"
+  fi
+
+  log "Extracting to $install_path as user $user..." "$NC"
+  debug_log "Tarball path: $tarball_path"
+  debug_log "Extract command: tar -xzf $tarball_path -C $target_dir"
+
+  debug_log "Testing tarball integrity"
+  tar -tzf "$tarball_path" >/dev/null 2>&1 || {
+    log "Error: Tarball integrity check failed" "$RED"
+    debug_log "Trying with verbose output: tar -tvzf $tarball_path"
+    if [[ "$DEBUG" -eq 1 ]]; then
+      tar -tvzf "$tarball_path" || true
+    fi
+    exit 1
+  }
+
   if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
-    sudo -u "$user" tar -xzf "$TMP_DIR/$tarball_name" -C "$target_dir" 2>/dev/null || {
-      log "Error: Extraction failed" "$RED"
+    debug_log "Extracting as user $user using sudo"
+    local extract_script="$TMP_DIR/extract.sh"
+    echo "#!/bin/bash" > "$extract_script"
+    echo "cd '$TMP_DIR' && tar -xzf '$tarball_name' -C '$target_dir'" >> "$extract_script"
+    chmod +x "$extract_script"
+
+    local extract_output
+    extract_output=$(sudo -u "$user" "$extract_script" 2>&1) || {
+      log "Error: Extraction failed as user $user" "$RED"
+      debug_log "Extraction output: $extract_output"
       exit 1
     }
+
     chown -R "$user:$user" "$install_path" 2>/dev/null || {
       log "Warning: Failed to set ownership of $install_path to $user" "$RED"
     }
   else
-    tar -xzf "$TMP_DIR/$tarball_name" -C "$target_dir" 2>/dev/null || {
+    debug_log "Extracting directly"
+    local extract_output
+    extract_output=$(tar -xzf "$tarball_path" -C "$target_dir" 2>&1) || {
       log "Error: Extraction failed" "$RED"
+      debug_log "Extraction output: $extract_output"
       exit 1
     }
   fi
+
+  if [[ ! -d "$install_path" ]]; then
+    log "Error: Installation directory not created after extraction" "$RED"
+    debug_log "Target directory contents: $(ls -la "$target_dir")"
+    exit 1
+  fi
+
+  local file_count
+  file_count=$(find "$install_path" -type f | wc -l)
+  debug_log "Files extracted: $file_count"
+  debug_log "Extracted files (first 10): $(find "$install_path" -type f | head -n 10)"
+
+  if [[ "$file_count" -lt "$MIN_FILES" ]]; then
+    log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
+  fi
+
   log "GE-Proton $version installed successfully" "$GREEN"
   log "Note: Steam requires a restart to detect GE-Proton $version. In Steam: Steam > Settings > Compatibility > Ensure 'Enable Steam Play for all other titles' is checked > Set 'Run other titles with' to 'GE-Proton $version'." "$NC"
   return 0
@@ -221,16 +371,16 @@ install_ge_proton() {
 cleanup_old_versions() {
   local user="$1" target_dir="$2" latest_version="$3"
   local versions_to_keep=2
-  
+
   log "Cleaning up old GE-Proton versions..." "$NC"
   local versions
   versions=$(ls -d "$target_dir"/GE-Proton* 2>/dev/null | sort -V | head -n -$versions_to_keep)
-  
+
   if [[ -z "$versions" ]]; then
     log "No old versions to clean up." "$NC"
     return
   fi
-  
+
   for old_version in $versions; do
     if [[ "$old_version" != "$target_dir/$latest_version" ]]; then
       log "Removing $old_version..." "$NC"
@@ -248,22 +398,32 @@ cleanup_old_versions() {
   log "Cleanup complete." "$NC"
 }
 
-# Check for --force-root flag
+# Check for flags
 FORCE_ROOT=0
 for arg in "$@"; do
   if [[ "$arg" == "--force-root" ]]; then
     FORCE_ROOT=1
-    break
+  elif [[ "$arg" == "--debug" ]]; then
+    DEBUG=1
   fi
 done
+
+# Print system info in debug mode
+if [[ "$DEBUG" -eq 1 ]]; then
+  debug_log "System info: $(uname -a)"
+  debug_log "Current user: $(whoami)"
+  debug_log "EUID: $EUID"
+  if [[ -v SUDO_USER ]]; then
+    debug_log "SUDO_USER: $SUDO_USER"
+  fi
+fi
 
 # Main execution
 log "Checking for GE-Proton updates..." "$NC"
 
-# Detect the effective user
 EFFECTIVE_USER=$(get_effective_user)
+debug_log "Effective user: $EFFECTIVE_USER"
 
-# Check GE_PROTON_TARGET first
 TARGET_SET=0
 if [[ -v GE_PROTON_TARGET && -n "$GE_PROTON_TARGET" ]]; then
   if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
@@ -275,44 +435,63 @@ if [[ -v GE_PROTON_TARGET && -n "$GE_PROTON_TARGET" ]]; then
   fi
 fi
 
-# Handle root-only case if no valid GE_PROTON_TARGET
 if [[ "$TARGET_SET" -eq 0 && "$EFFECTIVE_USER" == "root" && "$EUID" -eq 0 && ! -v SUDO_USER ]]; then
   if [[ "$FORCE_ROOT" -eq 1 ]]; then
     log "Installing to root's Steam dir with --force-root" "$NC"
   else
     log "Skipping GE-Proton update: Running as root without sudo user, --force-root, or valid GE_PROTON_TARGET" "$RED"
-    rm -rf "$TMP_DIR"
     exit 0
   fi
 fi
 
-# Detect Steam directory if not overridden
 if [[ "$TARGET_SET" -eq 0 ]]; then
   COMPAT_DIR=$(find_steam_dir "$EFFECTIVE_USER")
   log "Using Steam directory: $COMPAT_DIR" "$NC"
+  debug_log "Target directory access check: $(ls -la "$COMPAT_DIR" 2>&1 || echo "Cannot access")"
 fi
 
-# Get latest release info
+TMP_DIR=$(make_secure_temp)
+debug_log "Using temp directory: $TMP_DIR"
+
+if [[ "$EUID" -eq 0 && "$EFFECTIVE_USER" != "root" ]]; then
+  debug_log "Setting permissions on temp directory for $EFFECTIVE_USER"
+  chown "$EFFECTIVE_USER:$EFFECTIVE_USER" "$TMP_DIR" || {
+    log "Warning: Failed to set ownership of temp directory to $EFFECTIVE_USER" "$RED"
+    debug_log "Current temp dir permissions: $(ls -la "$TMP_DIR")"
+  }
+  chmod 700 "$TMP_DIR" || {
+    log "Warning: Failed to set permissions on temp directory" "$RED"
+  }
+fi
+
+trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "Warning: Failed to clean up $TMP_DIR" "$RED"' EXIT
+
 get_latest_release
 
-# Check if latest version is already installed, install if not
-INSTALL_OCCURRED=0
-if install_ge_proton "$EFFECTIVE_USER" "$COMPAT_DIR" "$(basename "$tarball_url")" "$version"; then
-  INSTALL_OCCURRED=1
+if [[ -d "$COMPAT_DIR/$version" ]]; then
+  log "GE-Proton $version already installed at $COMPAT_DIR/$version" "$NC"
+  INSTALL_NEEDED=0
+else
+  INSTALL_NEEDED=1
+  debug_log "Installation needed: Latest version not found in target directory"
+fi
+
+if [[ "$INSTALL_NEEDED" -eq 1 ]]; then
+  tarball_name=$(download_and_verify)
+  debug_log "Tarball name returned: $tarball_name"
+  debug_log "Full tarball path: $TMP_DIR/$tarball_name"
+  debug_log "Tarball check before install: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
+  if [[ "$tarball_name" =~ ^Downloading ]]; then
+    log "Error: Invalid tarball name detected: $tarball_name" "$RED"
+    exit 1
+  fi
+  install_ge_proton "$EFFECTIVE_USER" "$COMPAT_DIR" "$tarball_name" "$version"
 else
   log "No installation needed." "$NC"
 fi
 
-# Download and verify only if installation occurred
-if [[ "$INSTALL_OCCURRED" -eq 1 ]]; then
-  download_and_verify
-fi
-
-# Clean up old versions
 cleanup_old_versions "$EFFECTIVE_USER" "$COMPAT_DIR" "$version"
 
-# Cleanup temp dir
-rm -rf "$TMP_DIR"
 log "Done!" "$NC"
 
 exit 0
