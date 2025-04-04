@@ -13,6 +13,7 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 - Cleans up old versions (keeps latest + 1 previous).
 - Handles user ownership (no root-owned files in your home dir).
 - Skips root installs as accidental unless explicitly allowed (`--force-root`).
+- Debug mode for troubleshooting (`--debug`)
 
 ## Prerequisites
 - `Bash`, `curl`, `tar`, `sha512sum` (standard on most distros).
@@ -50,7 +51,9 @@ export GE_PROTON_TARGET="/home/youruser/.steam/steam/compatibilitytools.d"
 
 - **Root with Custom Target:** `GE_PROTON_TARGET=/path/to/dir sudo ge-proton-updater`.
 
-- **Force Root Install:** sudo ge-proton-updater --force-root (if you a running Steam as root for some wild and unforseen reason).
+- **Force Root Install:** `ge-proton-updater --force-root` (if you a running Steam as root for some wild and unforseen reason).
+
+- **Debug Mode:** Something going wrong? run `ge-proton-updater --debug` for full verbiage.
 
 ## Steam Setup
 After a new GE-Proton install, Steam needs to be told to use it:
