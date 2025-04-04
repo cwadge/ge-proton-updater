@@ -21,7 +21,7 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 ## Installation
 ### Standalone
 ```bash
-curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /usr/local/bin/ge-proton-updater
+curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater -o /usr/local/bin/ge-proton-updater
 chmod +x /usr/local/bin/ge-proton-updater
 ge-proton-updater
 ```
@@ -29,13 +29,13 @@ ge-proton-updater
 ### As an `apt-up`/`pac-up` Hook
 1. Copy to the `apt-up` post-hook directory:
 ```bash
-sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /etc/apt-up.d/post.d/50-ge-proton
+sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater -o /etc/apt-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/apt-up.d/post.d/50-ge-proton
 ```
 
 Or for `pac-up`:
 ```bash
-sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater.sh -o /etc/pac-up.d/post.d/50-ge-proton
+sudo curl -sL https://raw.githubusercontent.com/cwadge/ge-proton-updater/main/ge-proton-updater -o /etc/pac-up.d/post.d/50-ge-proton
 sudo chmod +x /etc/pac-up.d/post.d/50-ge-proton
 ```
 2. (Optional) Set a custom target in `/etc/apt-up.conf` or `/etc/pac-up.conf`:
@@ -88,10 +88,10 @@ Use multiple copies of the script with hard-coded targets:
 
 1. Copy and edit the script for each user:
 ```bash
-sudo cp ge-proton-updater.sh /etc/apt-up.d/post.d/ge-proton-updater-gamer1
+sudo cp ge-proton-updater /etc/apt-up.d/post.d/ge-proton-updater-gamer1
 sudo chmod +x /etc/apt-up.d/post.d/ge-proton-updater-gamer1
 # Edit ge-proton-updater-gamer1, uncomment and set: GE_PROTON_TARGET="/home/gamer1/.steam/steam/compatibilitytools.d"
-sudo cp ge-proton-updater.sh /etc/apt-up.d/post.d/ge-proton-updater-gamer2
+sudo cp ge-proton-updater /etc/apt-up.d/post.d/ge-proton-updater-gamer2
 sudo chmod +x /etc/apt-up.d/post.d/ge-proton-updater-gamer2
 # Edit ge-proton-updater-gamer2, uncomment and set: GE_PROTON_TARGET="/home/gamer2/.steam/steam/compatibilitytools.d"
 ...
