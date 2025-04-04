@@ -41,7 +41,7 @@ sudo chmod +x /etc/pac-up.d/post.d/50-ge-proton
 ```
 2. (Optional) Set a custom target in `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
-export GE_PROTON_TARGET="/home/youruser/.steam/steam/compatibilitytools.d"
+EXPORT_VARS="GE_PROTON_TARGET=/home/youruser/.steam/steam/compatibilitytools.d"
 ```
 
 3. Run `sudo apt-up` or `sudo pac-up`.
@@ -51,9 +51,9 @@ export GE_PROTON_TARGET="/home/youruser/.steam/steam/compatibilitytools.d"
 
 - **Root with Custom Target:** `GE_PROTON_TARGET=/path/to/dir sudo ge-proton-updater`.
 
-- **Force Root Install:** `ge-proton-updater --force-root` (if you a running Steam as root for some wild and unforseen reason).
+- **Force Root Install:** `ge-proton-updater --force-root` (if you're running Steam as root for some wild and unforseen reason).
 
-- **Debug Mode:** Something going wrong? run `ge-proton-updater --debug` for full verbiage.
+- **Debug Mode:** Something going wrong? Run `ge-proton-updater --debug` for full verbiage.
 
 ## Steam Setup
 After a new GE-Proton install, Steam needs to be told to use it:
@@ -71,12 +71,12 @@ For systems with multiple Steam users, adapt the script as follows:
 
 ### Admin And Gamer Aren't The Same User:
 Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
-  - In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
+    - In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
 
-  - Run `sudo apt-up` or `sudo pac-up`.
+    - Run `sudo apt-up` or `sudo pac-up`.
 
 ### Standalone, Multiple Gamers:
 Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
@@ -102,7 +102,7 @@ sudo chmod +x /etc/apt-up.d/post.d/ge-proton-updater-gamer2
 
 2. Run parent script, e.g. `sudo apt-up` or `sudo pac-up`. Each hook updates its respective user’s GE-Proton individually.
 
-  - Be sure you don’t set `GE_PROTON_TARGET` in `apt-up.conf`/`pac-up.conf` in this case, as it’d override the script-specific targets.
+    - Be sure you don’t set `GE_PROTON_TARGET` in `apt-up.conf`/`pac-up.conf` in this case, as it’d override the script-specific targets.
 
 ## License
 MIT License ([LICENSE](https://opensource.org/license/MIT)) - feel free to use, modify, and share!
