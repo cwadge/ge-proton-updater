@@ -71,12 +71,12 @@ For systems with multiple Steam users, adapt the script as follows:
 
 ### Admin And Gamer Aren't The Same User:
 Set `GE_PROTON_TARGET` upstream for the gamer’s Steam path, e.g.:
-    - In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
+1. In `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 ```bash
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
 
-    - Run `sudo apt-up` or `sudo pac-up`.
+2. Run `sudo apt-up` or `sudo pac-up`.
 
 ### Standalone, Multiple Gamers:
 Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
