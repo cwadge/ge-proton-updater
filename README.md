@@ -19,6 +19,26 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 - `Bash`, `curl`, `tar`, `sha512sum` (standard on most distros).
 - `Steam` installed (native or Flatpak).
 
+## Example Run
+Here it's found a new version, downloaded and checksummed it, extracted it to our Steam custom Proton directory, and cleaned up all but our two latest installations.
+```
+Checking for GE-Proton updates...
+Using overridden Steam directory: /home/chris/.steam/steam/compatibilitytools.d
+Latest version: GE-Proton9-27
+Downloading GE-Proton9-27.tar.gz...
+/tmp/ge-proton-update.hSIxGS/GE-Proton9-27.tar.gz          100%   
+Verifying checksum...
+Checksum verification passed
+Extracting to /home/chris/.steam/steam/compatibilitytools.d/GE-Proton9-27 as user chris...
+GE-Proton9-27 installed successfully
+Note: Steam requires a restart to detect GE-Proton9-27.
+In Steam: Steam > Settings > Compatibility > Ensure 'Enable Steam Play for all other titles' is checked > Set 'Run other titles with' to 'GE-Proton9-27'.
+Cleaning up old GE-Proton versions...
+Removing /home/chris/.steam/steam/compatibilitytools.d/GE-Proton9-25...
+Cleanup complete.
+Done!
+```
+
 ## Installation
 ### Standalone
 ```bash
