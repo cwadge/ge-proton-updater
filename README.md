@@ -82,9 +82,7 @@ After a new GE-Proton install, Steam needs to be told to use it:
 
 2. Go to `Steam` > `Settings` > `Compatibility`.
 
-3. Check "Enable Steam Play for all other titles".
-
-4. Set "Run other titles with" to the new `GE-Proton` version (e.g. `GE-Proton9-27`).
+3. Set "Default compatibility tool:" to the new `GE-Proton` version (e.g. `GE-Proton9-27`).
 
 ## Multi-User, Multi-Steam Systems
 For systems with multiple Steam users, adapt the script as follows:
