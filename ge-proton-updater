@@ -392,8 +392,8 @@ install_ge_proton() {
 											log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
 										fi
 
-										log "$version installed successfully" "$GREEN"
-										log "Note: Steam requires a restart to detect $version."
+										log "$version installed successfully!" "$GREEN"
+										log "Note: Steam requires a restart to detect $version." "$GREEN"
 										log "In Steam: Steam > Settings > Compatibility > Set 'Default compatibility tool' to '$version'." "$GREEN"
 										return 0
 									}

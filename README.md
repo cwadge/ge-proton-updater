@@ -24,18 +24,17 @@ Here it's found a new version, downloaded and checksummed it, extracted it to ou
 ```
 Checking for GE-Proton updates...
 Using overridden Steam directory: /home/chris/.steam/steam/compatibilitytools.d
-Latest version: GE-Proton9-27
-Downloading GE-Proton9-27.tar.gz...
-/tmp/ge-proton-update.hSIxGS/GE-Proton9-27.tar.gz          100%   
+Latest version: GE-Proton10-8
+Downloading GE-Proton10-8.tar.gz...
+/tmp/ge-proton-update.BJfprL/GE-Proton10-8.tar.gz          100% 478.83M 90.1MB/s in 5.2s    
 Verifying checksum...
 Checksum verification passed
-Extracting to /home/chris/.steam/steam/compatibilitytools.d/GE-Proton9-27 as user chris...
-GE-Proton9-27 installed successfully
-Note: Steam requires a restart to detect GE-Proton9-27.
-In Steam: Steam > Settings > Compatibility > Set 'Default compatibility tool' to 'GE-Proton9-27'.
+Extracting to /home/chris/.steam/steam/compatibilitytools.d/GE-Proton10-8 as user chris...
+GE-Proton10-8 installed successfully!
+Note: Steam requires a restart to detect GE-Proton10-8.
+In Steam: Steam > Settings > Compatibility > Set 'Default compatibility tool' to 'GE-Proton10-8'.
 Cleaning up old GE-Proton versions...
-Removing /home/chris/.steam/steam/compatibilitytools.d/GE-Proton9-25...
-Cleanup complete.
+No old versions to clean up.
 Done!
 ```
 
