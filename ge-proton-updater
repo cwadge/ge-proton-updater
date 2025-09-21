@@ -195,41 +195,72 @@ echo "$compat_dir"
 
 # Function to get latest GE-Proton version and URLs
 get_latest_release() {
+	local compat_dir_param="$1"  # Pass COMPAT_DIR as parameter
 	local release_info http_code
 	debug_log "Fetching latest release info from GitHub API"
-	release_info=$(curl -s -w "%{http_code}" "$GH_API_URL" -o "$TMP_DIR/release.json")
+	debug_log "API URL: $GH_API_URL"
+	debug_log "Temp dir: $TMP_DIR"
+
+	release_info=$(curl -s -w "%{http_code}" "$GH_API_URL" -o "$TMP_DIR/release.json" 2>&1)
 	http_code="${release_info: -3}"
-	release_info=$(cat "$TMP_DIR/release.json")
-	if [[ "$http_code" -eq 403 ]]; then
-		log "Error: GitHub API rate limit exceeded" "$RED"
-		exit 1
-	elif [[ "$http_code" -ne 200 ]]; then
-		log "Error: GitHub API request failed with HTTP $http_code" "$RED"
-		debug_log "API response: $release_info"
+	debug_log "HTTP response code: $http_code"
+	debug_log "curl output: $release_info"
+
+	if [[ ! -f "$TMP_DIR/release.json" ]]; then
+		log "Error: Failed to create release.json file" "$RED"
+		debug_log "Temp directory contents: $(ls -la "$TMP_DIR" 2>&1)"
 		exit 1
 	fi
 
+	release_info=$(cat "$TMP_DIR/release.json" 2>&1)
+	debug_log "JSON file size: $(wc -c < "$TMP_DIR/release.json" 2>/dev/null || echo "unknown")"
+	debug_log "First 200 chars of response: ${release_info:0:200}"
+
+	if [[ "$http_code" -eq 403 ]]; then
+		log "Error: GitHub API rate limit exceeded" "$RED"
+		debug_log "Full API response: $release_info"
+		exit 1
+	elif [[ "$http_code" -ne 200 ]]; then
+		log "Error: GitHub API request failed with HTTP $http_code" "$RED"
+		debug_log "Full API response: $release_info"
+		exit 1
+	fi
+
+	debug_log "Starting JSON parsing"
 	if command -v jq >/dev/null 2>&1; then
-		version=$(echo "$release_info" | jq -r '.tag_name')
-		tarball_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url')
-		checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".sha512sum")) | .browser_download_url')
+		debug_log "Using jq for JSON parsing"
+		version=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
+		debug_log "jq version result: $version"
+		tarball_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' 2>/dev/null || echo "")
+		debug_log "jq tarball_url result: $tarball_url"
+		checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".sha512sum")) | .browser_download_url' 2>/dev/null || echo "")
+		debug_log "jq checksum_url result: $checksum_url"
 	else
-		if grep -P >/dev/null 2>&1 <<< ""; then
-			version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+')
-			tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz')
-			checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum')
+		debug_log "Using grep/cut for JSON parsing"
+		if grep -P >/dev/null 2>&1 <<< "test"; then
+			debug_log "Using grep -P (Perl regex)"
+			version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+' 2>/dev/null || echo "")
+			tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz' 2>/dev/null || echo "")
+			checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum' 2>/dev/null || echo "")
 		else
-			version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4)
-			tarball_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | cut -d'"' -f4)
-			checksum_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' | cut -d'"' -f4)
+			debug_log "Using basic grep"
+			version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
+			tarball_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
+			checksum_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
 		fi
+		debug_log "grep/cut version result: $version"
+		debug_log "grep/cut tarball_url result: $tarball_url"
+		debug_log "grep/cut checksum_url result: $checksum_url"
 	fi
 
 	if [[ -z "$version" ]]; then
 		log "Error: Failed to parse version from GitHub API" "$RED"
-		debug_log "API response: $release_info"
+		debug_log "Full API response: $release_info"
 		exit 1
 	fi
+
+	debug_log "Successfully parsed version: $version"
+	debug_log "Checking for assets availability"
 
 	# Check if assets are available
 	if [[ -z "$tarball_url" || -z "$checksum_url" ]]; then
@@ -237,8 +268,9 @@ get_latest_release() {
 		log "This usually happens when a release is just published but assets are still being uploaded" "$YELLOW"
 		log "Please try again in a few minutes, or check: https://github.com/GloriousEggroll/proton-ge-custom/releases/latest" "$YELLOW"
 
-		# Check if we already have this version installed
-		if [[ -d "$COMPAT_DIR/$version" ]]; then
+		debug_log "Checking if version already installed in: $compat_dir_param"
+		# Check if we already have this version installed (only if compat_dir is provided)
+		if [[ -n "$compat_dir_param" && -d "$compat_dir_param/$version" ]]; then
 			log "$version is already installed, nothing to do" "$GREEN"
 			exit 0
 		else
@@ -250,6 +282,7 @@ get_latest_release() {
 	log "Latest version: $version" "$NC"
 	debug_log "Tarball URL: $tarball_url"
 	debug_log "Checksum URL: $checksum_url"
+	debug_log "get_latest_release function completed successfully"
 }
 
 # Function to download and verify
@@ -543,7 +576,7 @@ fi
 
 trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "Warning: Failed to clean up $TMP_DIR" "$RED"' EXIT
 
-get_latest_release
+get_latest_release "$COMPAT_DIR"
 
 if [[ -d "$COMPAT_DIR/$version" ]]; then
 	log "$version already installed at $COMPAT_DIR/$version" "$NC"
