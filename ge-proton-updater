@@ -225,11 +225,28 @@ get_latest_release() {
 		fi
 	fi
 
-	if [[ -z "$version" || -z "$tarball_url" || -z "$checksum_url" ]]; then
-		log "Error: Failed to parse release info from GitHub API" "$RED"
+	if [[ -z "$version" ]]; then
+		log "Error: Failed to parse version from GitHub API" "$RED"
 		debug_log "API response: $release_info"
 		exit 1
 	fi
+
+	# Check if assets are available
+	if [[ -z "$tarball_url" || -z "$checksum_url" ]]; then
+		log "Warning: Latest release ($version) doesn't have binary assets available yet" "$YELLOW"
+		log "This usually happens when a release is just published but assets are still being uploaded" "$YELLOW"
+		log "Please try again in a few minutes, or check: https://github.com/GloriousEggroll/proton-ge-custom/releases/latest" "$YELLOW"
+
+		# Check if we already have this version installed
+		if [[ -d "$COMPAT_DIR/$version" ]]; then
+			log "$version is already installed, nothing to do" "$GREEN"
+			exit 0
+		else
+			log "Assets not available for download yet, exiting" "$RED"
+			exit 1
+		fi
+	fi
+
 	log "Latest version: $version" "$NC"
 	debug_log "Tarball URL: $tarball_url"
 	debug_log "Checksum URL: $checksum_url"
