@@ -10,8 +10,8 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 ## Features
 - Fetches the latest GE-Proton from GitHub.
 - Verifies checksums for security and consistency.
-- Installs to a **static** `GE-Proton-Latest` directory in `~/.steam/steam/compatibilitytools.d` (or a custom path), with a customized `compatibilitytool.vdf` so Steam recognizes it as **"Proton - GE Latest"**.
-- Automatically rotates the previous version to `GE-Proton-Previous` (**"Proton - GE Previous"**) as a fallback in case of critical bugs.
+- Installs to a **static** `GE-Proton-Latest` directory in `~/.steam/steam/compatibilitytools.d` (or a custom path), with a customized `compatibilitytool.vdf` so Steam recognizes it as **"Proton GE Latest"**.
+- Automatically rotates the previous version to `GE-Proton-Previous` (**"Proton GE Previous"**) as a fallback in case of critical bugs.
 - After initial setup, **no Steam restart is required** for updates — the static internal name means Steam uses the new build immediately.
 - Tracks installed versions via a state file (`.ge-proton-version`) to avoid redundant downloads.
 - Cleans up legacy versioned directories (e.g. `GE-Proton10-27`) from older script versions.
@@ -24,16 +24,21 @@ Instead of extracting each GE-Proton release to its own versioned directory (e.g
 
 | Directory | Internal Name | Display Name (in Steam) |
 |---|---|---|
-| `GE-Proton-Latest/` | `GE-Proton-Latest` | `Proton - GE Latest` |
-| `GE-Proton-Previous/` | `GE-Proton-Previous` | `Proton - GE Previous` |
+| `GE-Proton-Latest/` | `GE-Proton-Latest` | `Proton GE Latest` |
+| `GE-Proton-Previous/` | `GE-Proton-Previous` | `Proton GE Previous` |
 
-Since Steam's `CompatToolMapping` in `config.vdf` references tools by their **internal name**, keeping the internal name static means you only need to select `Proton - GE Latest` once. After that, every update transparently replaces the contents of that directory and Steam uses the new build at the next game launch.
+Since Steam's `CompatToolMapping` in `config.vdf` references tools by their **internal name**, keeping the internal name static means you only need to select `Proton GE Latest` once. After that, every update transparently replaces the contents of that directory and Steam uses the new build at the next game launch.
 
 The actual GE-Proton version installed under each slot is tracked internally via a `.ge-proton-version` state file and reported in the script's output.
 
 ## Prerequisites
 - `Bash`, `curl`, `tar`, `sha512sum` (standard on most distros).
-- `Steam` installed (native or Flatpak).
+- `Steam` installed natively (`.deb`, package manager, etc.).
+
+> **Flatpak Steam users**: This script is not compatible with Flatpak Steam. Upstream GE-Proton tarballs include pressure-vessel, which cannot nest inside Flatpak's sandbox. Install GE-Proton via Flatpak instead:
+> ```bash
+> flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
+> ```
 
 ## Example Run
 Here it's found a new version, rotated the previous Latest to Previous, downloaded and checksummed the new release, extracted it, and rewrote the VDF files:
@@ -48,7 +53,7 @@ Downloading GE-Proton10-30.tar.gz...
 Verifying checksum...
 Checksum verification passed
 Extracting GE-Proton10-30 to /home/chris/.steam/steam/compatibilitytools.d/GE-Proton-Latest as user chris...
-GE-Proton10-30 installed as 'Proton - GE Latest'!
+GE-Proton10-30 installed as 'Proton GE Latest'!
 ==> Updated in-place. No Steam restart required.
 Done!
 ```
@@ -96,11 +101,11 @@ After the **first** GE-Proton install, Steam needs to be told to use it:
 
 2. Go to `Steam` > `Settings` > `Compatibility`.
 
-3. Set "Default compatibility tool:" to `Proton - GE Latest`.
+3. Set "Default compatibility tool:" to `Proton GE Latest`.
 
 **That's it — you only need to do this once.** Future updates will be picked up automatically without restarting Steam.
 
-If a new build causes issues, you can switch to `Proton - GE Previous` as a fallback until the next release.
+If a new build causes issues, you can switch to `Proton GE Previous` as a fallback until the next release.
 
 ## Migrating from Older Versions
 If you were previously using versioned directory names (e.g. `GE-Proton10-27`, `GE-Proton10-28`), the script will:
@@ -108,7 +113,7 @@ If you were previously using versioned directory names (e.g. `GE-Proton10-27`, `
 1. Install the latest version to `GE-Proton-Latest/` with the new static naming.
 2. Automatically clean up any legacy versioned directories.
 
-After migrating, you'll need to restart Steam once and select `Proton - GE Latest` as your compatibility tool. From that point forward, updates are seamless.
+After migrating, you'll need to restart Steam once and select `Proton GE Latest` as your compatibility tool. From that point forward, updates are seamless.
 
 ## Multi-User, Multi-Steam Systems
 For systems with multiple Steam users, adapt the script as follows:

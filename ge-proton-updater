@@ -36,8 +36,8 @@ LATEST_DIR="GE-Proton-Latest"
 PREVIOUS_DIR="GE-Proton-Previous"
 LATEST_INTERNAL="GE-Proton-Latest"
 PREVIOUS_INTERNAL="GE-Proton-Previous"
-LATEST_DISPLAY_PREFIX="Proton - GE Latest"
-PREVIOUS_DISPLAY_PREFIX="Proton - GE Previous"
+LATEST_DISPLAY_PREFIX="Proton GE Latest"
+PREVIOUS_DISPLAY_PREFIX="Proton GE Previous"
 VERSION_FILE=".ge-proton-version"
 
 # Debug mode flag
@@ -160,7 +160,10 @@ find_steam_dir() {
 	local steam_base_paths=(
 		"$home_dir/.steam/steam"              # Most common native Steam
 		"$home_dir/.steam"                    # Older native setups
-		"$home_dir/.var/app/com.valvesoftware.Steam/data/Steam"  # Flatpak (may vary)
+		# Note: Flatpak Steam is intentionally excluded. Upstream GE-Proton tarballs
+		# include pressure-vessel, which fails inside Flatpak's existing sandbox.
+		# Flatpak users should install GE-Proton via:
+		#   flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
 	)
 
 	for base in "${steam_base_paths[@]}"; do
