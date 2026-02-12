@@ -11,9 +11,10 @@
 #   - CLI: GE_PROTON_TARGET="/path" ./50-ge-proton
 # - Use --force-root to allow installation to /root/.steam/... as root
 # - Use --debug for verbose output
+# - Use --dry-run to check for updates and report what would happen without
+#   downloading or installing anything (also honoured via IS_DRY_RUN=true,
+#   which apt-up/pac-up export automatically when run with --dry-run)
 # - Designed for apt-up/pac-up hooks or standalone use
-# - Respects IS_DRY_RUN=true (exported by apt-up/pac-up --dry-run): checks for
-#   updates and reports what would happen without downloading or installing
 #
 # This script uses static directory names (GE-Proton-Latest, GE-Proton-Previous)
 # with customized compatibilitytool.vdf files so that Steam doesn't require a
@@ -632,6 +633,8 @@ for arg in "$@"; do
 		FORCE_ROOT=1
 	elif [[ "$arg" == "--debug" ]]; then
 		DEBUG=1
+	elif [[ "$arg" == "--dry-run" ]]; then
+		IS_DRY_RUN=true
 	fi
 done
 

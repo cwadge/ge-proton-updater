@@ -3,7 +3,7 @@
 A Bash script to automatically download, verify, and install the latest [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) ([GloriousEggroll](https://x.com/GloriousEggroll)'s excellent Proton fork) for Steam on Linux desktops / laptops. Keeps your gaming compatibility tools up-to-date with minimal hassle.
 
 - **Standalone**: Runs anywhere to update GE-Proton.
-- **Hook-Friendly**: Perfect as a post-update script for [apt-up](https://github.com/cwadge/apt-up) or [pac-up](https://github.com/cwadge/pac-up).
+- **Hook-Friendly**: Perfect as a post-update script for [apt-up](https://github.com/cwadge/apt-up) or [pac-up](https://github.com/cwadge/pac-up). Fully dry-run aware via `IS_DRY_RUN`.
 - **Efficient**: Nothing happens unless it needs to.
 - **No Restart Required**: After initial setup, GE-Proton updates are picked up by Steam automatically — no restart needed.
 
@@ -17,6 +17,7 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 - Cleans up legacy versioned directories (e.g. `GE-Proton10-27`) from older script versions.
 - Handles user ownership (no root-owned files in your home dir).
 - Skips root installs as accidental unless explicitly allowed (`--force-root`).
+- **Dry-run aware**: checks `IS_DRY_RUN` when run as a hook and reports what would happen without downloading or installing anything.
 - Debug mode for troubleshooting (`--debug`).
 
 ## How It Works
@@ -85,12 +86,30 @@ EXPORT_VARS="GE_PROTON_TARGET=/home/youruser/.steam/steam/compatibilitytools.d"
 
 3. Run `sudo apt-up` or `sudo pac-up`.
 
+### Dry-Run Awareness
+
+When installed as an apt-up or pac-up hook, the script automatically respects dry-run mode. Both parent scripts export `IS_DRY_RUN=true` before running any hooks when `--dry-run` is active. The updater checks this variable and, if set, queries the GitHub API for the latest version and reports what it would do — without downloading, extracting, or modifying anything:
+
+```
+[DRY-RUN] Would update GE-Proton: GE-Proton10-29 → GE-Proton10-30
+```
+
+or, if already up to date:
+
+```
+GE-Proton10-30 is already up to date.
+```
+
+No special configuration is needed — dry-run awareness is built in.
+
 ## Usage
 - **Standalone:** `ge-proton-updater` (updates for the current user).
 
 - **Root with Custom Target:** `GE_PROTON_TARGET=/path/to/dir sudo ge-proton-updater`.
 
 - **Force Root Install:** `ge-proton-updater --force-root` (if you're running Steam as root for some wild and unforeseen reason).
+
+- **Dry-Run:** `ge-proton-updater --dry-run` — checks for a newer version and reports what would happen without downloading or modifying anything.
 
 - **Debug Mode:** Something going wrong? Run `ge-proton-updater --debug` for full verbiage.
 
