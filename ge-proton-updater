@@ -12,6 +12,8 @@
 # - Use --force-root to allow installation to /root/.steam/... as root
 # - Use --debug for verbose output
 # - Designed for apt-up/pac-up hooks or standalone use
+# - Respects IS_DRY_RUN=true (exported by apt-up/pac-up --dry-run): checks for
+#   updates and reports what would happen without downloading or installing
 #
 # This script uses static directory names (GE-Proton-Latest, GE-Proton-Previous)
 # with customized compatibilitytool.vdf files so that Steam doesn't require a
@@ -738,21 +740,33 @@ else
 fi
 
 if [[ "$INSTALL_NEEDED" -eq 1 ]]; then
-	tarball_name=$(download_and_verify)
-	debug_log "Tarball name returned: $tarball_name"
-	debug_log "Full tarball path: $TMP_DIR/$tarball_name"
-	debug_log "Tarball check before install: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
-	if [[ "$tarball_name" =~ ^Downloading ]]; then
-		log "Error: Invalid tarball name detected: $tarball_name" "$RED"
-		exit 1
+	if [[ "${IS_DRY_RUN:-false}" == "true" ]]; then
+		if [[ -n "$INSTALLED_VERSION" ]]; then
+			log "[DRY-RUN] Would update GE-Proton: $INSTALLED_VERSION → $version" "$NC"
+		else
+			log "[DRY-RUN] Would install GE-Proton $version (first install)" "$NC"
+		fi
+	else
+		tarball_name=$(download_and_verify)
+		debug_log "Tarball name returned: $tarball_name"
+		debug_log "Full tarball path: $TMP_DIR/$tarball_name"
+		debug_log "Tarball check before install: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
+		if [[ "$tarball_name" =~ ^Downloading ]]; then
+			log "Error: Invalid tarball name detected: $tarball_name" "$RED"
+			exit 1
+		fi
+		install_ge_proton "$TARGET_USER" "$COMPAT_DIR" "$tarball_name" "$version"
 	fi
-	install_ge_proton "$TARGET_USER" "$COMPAT_DIR" "$tarball_name" "$version"
 else
 	log "No update needed." "$NC"
 fi
 
 # Clean up any legacy versioned directories from older script behavior
-cleanup_legacy_versions "$TARGET_USER" "$COMPAT_DIR"
+if [[ "${IS_DRY_RUN:-false}" == "true" ]]; then
+	log "[DRY-RUN] Would clean up legacy GE-Proton directories" "$NC"
+else
+	cleanup_legacy_versions "$TARGET_USER" "$COMPAT_DIR"
+fi
 
 log "Done!" "$NC"
 
