@@ -148,13 +148,13 @@ find_steam_dir() {
 			if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
 				sudo -u "$user" mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
 					log "Error: Cannot create $GE_PROTON_TARGET as $user" "$RED"
-					exit 1
-				}
-			else
-				mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
-					log "Error: Cannot create $GE_PROTON_TARGET" "$RED"
-					exit 1
-				}
+									exit 1
+								}
+							else
+								mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
+									log "Error: Cannot create $GE_PROTON_TARGET" "$RED"
+																	exit 1
+																}
 			fi
 			echo "$GE_PROTON_TARGET"
 			return 0
@@ -165,55 +165,55 @@ find_steam_dir() {
 
 	home_dir=$(getent passwd "$user" | cut -d: -f6)
 	local steam_base_paths=(
-		"$home_dir/.steam/steam"              # Most common native Steam
-		"$home_dir/.steam"                    # Older native setups
-		# Note: Flatpak Steam is intentionally excluded. Upstream GE-Proton tarballs
-		# include pressure-vessel, which fails inside Flatpak's existing sandbox.
-		# Flatpak users should install GE-Proton via:
-		#   flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
-	)
+	"$home_dir/.steam/steam"              # Most common native Steam
+	"$home_dir/.steam"                    # Older native setups
+	# Note: Flatpak Steam is intentionally excluded. Upstream GE-Proton tarballs
+	# include pressure-vessel, which fails inside Flatpak's existing sandbox.
+	# Flatpak users should install GE-Proton via:
+	#   flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
+)
 
-	for base in "${steam_base_paths[@]}"; do
+for base in "${steam_base_paths[@]}"; do
+	compat_dir="$base/compatibilitytools.d"
+	if [[ -d "$compat_dir" ]]; then
+		echo "$compat_dir"
+		return 0
+	fi
+done
+
+for base in "${steam_base_paths[@]}"; do
+	if [[ -d "$base/steamapps" ]]; then
 		compat_dir="$base/compatibilitytools.d"
-		if [[ -d "$compat_dir" ]]; then
-			echo "$compat_dir"
-			return 0
+		if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+			sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
+				log "Error: Cannot create $compat_dir as $user" "$RED"
+							exit 1
+						}
+					else
+						mkdir -p "$compat_dir" 2>/dev/null || {
+							log "Error: Cannot create $compat_dir" "$RED"
+													exit 1
+												}
 		fi
-	done
+		echo "$compat_dir"
+		return 0
+	fi
+done
 
-	for base in "${steam_base_paths[@]}"; do
-		if [[ -d "$base/steamapps" ]]; then
-			compat_dir="$base/compatibilitytools.d"
-			if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-				sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
-					log "Error: Cannot create $compat_dir as $user" "$RED"
-					exit 1
-				}
-			else
-				mkdir -p "$compat_dir" 2>/dev/null || {
-					log "Error: Cannot create $compat_dir" "$RED"
-					exit 1
-				}
-			fi
-			echo "$compat_dir"
-			return 0
-		fi
-	done
-
-	default_base="$home_dir/.steam/steam"
-	compat_dir="$default_base/compatibilitytools.d"
-	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-		sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
-			log "Error: Cannot create $compat_dir as $user" "$RED"
+default_base="$home_dir/.steam/steam"
+compat_dir="$default_base/compatibilitytools.d"
+if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+	sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
+		log "Error: Cannot create $compat_dir as $user" "$RED"
 			exit 1
 		}
 	else
 		mkdir -p "$compat_dir" 2>/dev/null || {
 			log "Error: Cannot create $compat_dir" "$RED"
-			exit 1
-		}
-	fi
-	echo "$compat_dir"
+					exit 1
+				}
+fi
+echo "$compat_dir"
 }
 
 # Resolve which GE-Proton build to fetch, as an asset-name suffix.
@@ -387,28 +387,28 @@ download_and_verify() {
 		debug_log "Using wget for download"
 		wget -q --show-progress -O "$TMP_DIR/$tarball_name" "$tarball_url" || {
 			log "Error: Download failed with wget" "$RED"
-			if [[ "$DEBUG" -eq 1 ]]; then
-				wget -O "$TMP_DIR/$tarball_name" "$tarball_url"
-			fi
-			exit 1
-		}
-		wget -q -O "$TMP_DIR/$checksum_name" "$checksum_url" || {
-			log "Error: Checksum download failed with wget" "$RED"
-			exit 1
-		}
-	else
-		debug_log "Using curl for download"
-		curl -s -L "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
-			log "Error: Download failed with curl" "$RED"
-			if [[ "$DEBUG" -eq 1 ]]; then
-				curl -v -L "$tarball_url" -o "$TMP_DIR/$tarball_name"
-			fi
-			exit 1
-		}
-		curl -s -L "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
-			log "Error: Checksum download failed with curl" "$RED"
-			exit 1
-		}
+					if [[ "$DEBUG" -eq 1 ]]; then
+						wget -O "$TMP_DIR/$tarball_name" "$tarball_url"
+					fi
+					exit 1
+				}
+				wget -q -O "$TMP_DIR/$checksum_name" "$checksum_url" || {
+					log "Error: Checksum download failed with wget" "$RED"
+									exit 1
+								}
+							else
+								debug_log "Using curl for download"
+								curl -s -L "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
+									log "Error: Download failed with curl" "$RED"
+																	if [[ "$DEBUG" -eq 1 ]]; then
+																		curl -v -L "$tarball_url" -o "$TMP_DIR/$tarball_name"
+																	fi
+																	exit 1
+																}
+																curl -s -L "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
+																	log "Error: Checksum download failed with curl" "$RED"
+																																	exit 1
+																																}
 	fi
 
 	if [[ ! -s "$TMP_DIR/$tarball_name" ]]; then
@@ -479,8 +479,8 @@ write_vdf() {
 
       "from_oslist"  "windows"
       "to_oslist"    "linux"
-    }
-  }
+}
+}
 }
 VDFEOF
 }
@@ -494,36 +494,36 @@ install_ge_proton() {
 	debug_log "Creating target directory: $target_dir"
 	mkdir -p "$target_dir" 2>/dev/null || {
 		log "Error: Cannot create $target_dir" "$RED"
-		exit 1
-	}
+			exit 1
+		}
 
-	local tarball_path="$TMP_DIR/$tarball_name"
-	debug_log "Checking tarball before extraction: $tarball_path"
-	debug_log "Tarball details: $(ls -lh "$tarball_path" 2>/dev/null || echo 'Not found')"
-	if [[ ! -s "$tarball_path" ]]; then
-		log "Error: Tarball not found or empty at $tarball_path" "$RED"
-		exit 1
-	fi
-
-	local tarball_size
-	tarball_size=$(stat -c%s "$tarball_path" 2>/dev/null ||
-		stat -f%z "$tarball_path" 2>/dev/null ||
-		wc -c < "$tarball_path")
-	debug_log "Tarball size: $tarball_size bytes"
-
-	if [[ "$tarball_size" -lt 1000000 ]]; then
-		log "Warning: Tarball size ($tarball_size bytes) seems unusually small" "$YELLOW"
-	fi
-
-	debug_log "Testing tarball integrity"
-	tar -tzf "$tarball_path" >/dev/null 2>&1 || {
-		log "Error: Tarball integrity check failed" "$RED"
-		debug_log "Trying with verbose output: tar -tvzf $tarball_path"
-		if [[ "$DEBUG" -eq 1 ]]; then
-			tar -tvzf "$tarball_path" || true
+		local tarball_path="$TMP_DIR/$tarball_name"
+		debug_log "Checking tarball before extraction: $tarball_path"
+		debug_log "Tarball details: $(ls -lh "$tarball_path" 2>/dev/null || echo 'Not found')"
+		if [[ ! -s "$tarball_path" ]]; then
+			log "Error: Tarball not found or empty at $tarball_path" "$RED"
+			exit 1
 		fi
-		exit 1
-	}
+
+		local tarball_size
+		tarball_size=$(stat -c%s "$tarball_path" 2>/dev/null ||
+			stat -f%z "$tarball_path" 2>/dev/null ||
+			wc -c < "$tarball_path")
+					debug_log "Tarball size: $tarball_size bytes"
+
+					if [[ "$tarball_size" -lt 1000000 ]]; then
+						log "Warning: Tarball size ($tarball_size bytes) seems unusually small" "$YELLOW"
+					fi
+
+					debug_log "Testing tarball integrity"
+					tar -tzf "$tarball_path" >/dev/null 2>&1 || {
+						log "Error: Tarball integrity check failed" "$RED"
+											debug_log "Trying with verbose output: tar -tvzf $tarball_path"
+											if [[ "$DEBUG" -eq 1 ]]; then
+												tar -tvzf "$tarball_path" || true
+											fi
+											exit 1
+										}
 
 	# --- Determine the tarball's top-level directory up front ---
 	# Detect it from the tarball itself rather than assuming it equals the
@@ -555,33 +555,33 @@ install_ge_proton() {
 	rm -rf "$staging_dir" 2>/dev/null || true  # clear any stale staging from an interrupted run
 	"${run_as[@]}" mkdir -p "$staging_dir" 2>/dev/null || {
 		log "Error: Cannot create staging directory $staging_dir" "$RED"
-		exit 1
-	}
+			exit 1
+		}
 
-	log "Extracting $version to $LATEST_DIR..." "$NC"
-	debug_log "Extract: tar -xzf $tarball_path -C $staging_dir (as $user)"
-	local extract_output
-	extract_output=$("${run_as[@]}" tar -xzf "$tarball_path" -C "$staging_dir" 2>&1) || {
-		log "Error: Extraction failed${user:+ as user $user}" "$RED"
-		debug_log "Extraction output: $extract_output"
-		rm -rf "$staging_dir" 2>/dev/null || true
-		exit 1
-	}
+		log "Extracting $version to $LATEST_DIR..." "$NC"
+		debug_log "Extract: tar -xzf $tarball_path -C $staging_dir (as $user)"
+		local extract_output
+		extract_output=$("${run_as[@]}" tar -xzf "$tarball_path" -C "$staging_dir" 2>&1) || {
+			log "Error: Extraction failed${user:+ as user $user}" "$RED"
+					debug_log "Extraction output: $extract_output"
+					rm -rf "$staging_dir" 2>/dev/null || true
+					exit 1
+				}
 
-	local staged_path="$staging_dir/$extracted_top"
-	if [[ ! -d "$staged_path" ]]; then
-		log "Error: Expected extracted directory $staged_path not found" "$RED"
-		debug_log "Staging contents: $(ls -la "$staging_dir" 2>&1)"
-		rm -rf "$staging_dir" 2>/dev/null || true
-		exit 1
-	fi
+				local staged_path="$staging_dir/$extracted_top"
+				if [[ ! -d "$staged_path" ]]; then
+					log "Error: Expected extracted directory $staged_path not found" "$RED"
+					debug_log "Staging contents: $(ls -la "$staging_dir" 2>&1)"
+					rm -rf "$staging_dir" 2>/dev/null || true
+					exit 1
+				fi
 
-	local file_count
-	file_count=$(find "$staged_path" -type f | wc -l)
-	debug_log "Files extracted: $file_count"
-	if [[ "$file_count" -lt "$MIN_FILES" ]]; then
-		log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
-	fi
+				local file_count
+				file_count=$(find "$staged_path" -type f | wc -l)
+				debug_log "Files extracted: $file_count"
+				if [[ "$file_count" -lt "$MIN_FILES" ]]; then
+					log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
+				fi
 
 	# --- Now that a good build is staged, rotate Latest → Previous ---
 	local current_latest_version
@@ -602,30 +602,30 @@ install_ge_proton() {
 
 		mv "$latest_path" "$previous_path" 2>/dev/null || {
 			log "Error: Failed to rotate $LATEST_DIR → $PREVIOUS_DIR" "$RED"
-			rm -rf "$staging_dir" 2>/dev/null || true
-			exit 1
-		}
+					rm -rf "$staging_dir" 2>/dev/null || true
+					exit 1
+				}
 
-		write_vdf "$previous_path" "$PREVIOUS_INTERNAL" "$PREVIOUS_DISPLAY_PREFIX"
-		if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-			chown "$user:$user" "$previous_path/compatibilitytool.vdf" 2>/dev/null || true
-		fi
+				write_vdf "$previous_path" "$PREVIOUS_INTERNAL" "$PREVIOUS_DISPLAY_PREFIX"
+				if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
+					chown "$user:$user" "$previous_path/compatibilitytool.vdf" 2>/dev/null || true
+				fi
 
-		log "Previous version: $current_latest_version" "$GREEN"
-	else
-		# No usable Latest to rotate; clear any stale/partial Latest so the swap
-		# below creates a clean directory instead of nesting inside it.
-		rm -rf "$latest_path" 2>/dev/null || true
+				log "Previous version: $current_latest_version" "$GREEN"
+			else
+				# No usable Latest to rotate; clear any stale/partial Latest so the swap
+				# below creates a clean directory instead of nesting inside it.
+				rm -rf "$latest_path" 2>/dev/null || true
 	fi
 
 	# --- Swap the staged build into place (same-filesystem rename) ---
 	debug_log "Moving $staged_path → $latest_path"
 	mv "$staged_path" "$latest_path" 2>/dev/null || {
 		log "Error: Failed to move staged build into $latest_path" "$RED"
+			rm -rf "$staging_dir" 2>/dev/null || true
+			exit 1
+		}
 		rm -rf "$staging_dir" 2>/dev/null || true
-		exit 1
-	}
-	rm -rf "$staging_dir" 2>/dev/null || true
 
 	# Fix ownership of the new Latest if running as root for another user
 	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
@@ -745,14 +745,14 @@ if [[ -v GE_PROTON_TARGET && -n "${GE_PROTON_TARGET}" ]]; then
 			if [[ "$TARGET_USER" != "root" ]]; then
 				sudo -u "$TARGET_USER" mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
 					log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable even as $TARGET_USER" "$RED"
-					exit 1
-				}
-				COMPAT_DIR="$GE_PROTON_TARGET"
-				TARGET_SET=1
-				log "Created and using overridden Steam directory: $COMPAT_DIR" "$NC"
-			else
-				log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable for root" "$RED"
-				exit 1
+									exit 1
+								}
+								COMPAT_DIR="$GE_PROTON_TARGET"
+								TARGET_SET=1
+								log "Created and using overridden Steam directory: $COMPAT_DIR" "$NC"
+							else
+								log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable for root" "$RED"
+								exit 1
 			fi
 		else
 			log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable" "$RED"
@@ -794,11 +794,11 @@ if [[ "$EUID" -eq 0 && "$TARGET_USER" != "root" ]]; then
 	debug_log "Setting permissions on temp directory for $TARGET_USER"
 	chown "$TARGET_USER:$TARGET_USER" "$TMP_DIR" || {
 		log "Warning: Failed to set ownership of temp directory to $TARGET_USER" "$RED"
-		debug_log "Current temp dir permissions: $(ls -la "$TMP_DIR")"
-	}
-	chmod 700 "$TMP_DIR" || {
-		log "Warning: Failed to set permissions on temp directory" "$RED"
-	}
+			debug_log "Current temp dir permissions: $(ls -la "$TMP_DIR")"
+		}
+		chmod 700 "$TMP_DIR" || {
+			log "Warning: Failed to set permissions on temp directory" "$RED"
+		}
 fi
 
 get_latest_release "$COMPAT_DIR"
