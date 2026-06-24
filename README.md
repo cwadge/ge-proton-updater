@@ -9,6 +9,7 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 
 ## Features
 - Fetches the latest GE-Proton from GitHub.
+- **Architecture-aware**: auto-detects the host CPU (`x86_64` or `aarch64`) and downloads the matching GE-Proton build. Since GE-Proton11-1, upstream ships both, and the script selects the correct asset for your machine.
 - Verifies checksums for security and consistency.
 - Installs to a **static** `GE-Proton-Latest` directory in `~/.steam/steam/compatibilitytools.d` (or a custom path), with a customized `compatibilitytool.vdf` so Steam recognizes it as **"Proton GE Latest"**.
 - Automatically rotates the previous version to `GE-Proton-Previous` (**"Proton GE Previous"**) as a fallback in case of critical bugs.
@@ -35,6 +36,7 @@ The actual GE-Proton version installed under each slot is tracked internally via
 ## Prerequisites
 - `Bash`, `curl`, `tar`, `sha512sum` (standard on most distros).
 - `Steam` installed natively (`.deb`, package manager, etc.).
+- A supported CPU architecture: **x86_64** (amd64) or **aarch64** (arm64). The script auto-detects yours and fetches the matching build. You can force a specific build with `GE_PROTON_ARCH` (see Usage) — handy under a translation layer (FEX-Emu, box64, qemu-user) or to stage a build for another machine. An unrecognized CPU falls back to x86_64 with a warning rather than failing.
 
 > **Flatpak Steam users**: This script is not compatible with Flatpak Steam. Upstream GE-Proton tarballs include pressure-vessel, which cannot nest inside Flatpak's sandbox. Install GE-Proton via Flatpak instead:
 > ```bash
@@ -108,6 +110,8 @@ No special configuration is needed — dry-run awareness is built in.
 - **Root with Custom Target:** `GE_PROTON_TARGET=/path/to/dir sudo ge-proton-updater`.
 
 - **Force Root Install:** `ge-proton-updater --force-root` (if you're running Steam as root for some wild and unforeseen reason).
+
+- **Force Architecture:** `GE_PROTON_ARCH=aarch64 ge-proton-updater` (or `x86_64`) — overrides CPU auto-detection and fetches that build regardless of the host. Useful when running x86_64 GE-Proton under a translation layer on ARM (or vice versa), or to stage a build for a different machine. Accepts `x86_64`/`amd64` and `aarch64`/`arm64`; an unrecognized value is treated as an error.
 
 - **Dry-Run:** `ge-proton-updater --dry-run` — checks for a newer version and reports what would happen without downloading or modifying anything.
 

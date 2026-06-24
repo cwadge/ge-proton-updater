@@ -9,6 +9,10 @@
 #   - In-script: GE_PROTON_TARGET="/custom/path" (uncomment below)
 #   - Export: export GE_PROTON_TARGET="/home/user/.steam/steam/compatibilitytools.d"
 #   - CLI: GE_PROTON_TARGET="/path" ./50-ge-proton
+# - Set GE_PROTON_ARCH to force a specific build (x86_64 or aarch64) regardless
+#   of the detected CPU — useful under a translation layer (FEX-Emu, box64,
+#   qemu-user, etc.) or to stage a build for another machine. Auto-detected if
+#   unset; an unrecognized CPU falls back to x86_64 with a warning.
 # - Use --force-root to allow installation to /root/.steam/... as root
 # - Use --debug for verbose output
 # - Use --dry-run to check for updates and report what would happen without
@@ -212,6 +216,40 @@ find_steam_dir() {
 	echo "$compat_dir"
 }
 
+# Resolve which GE-Proton build to fetch, as an asset-name suffix.
+# Upstream publishes x86_64 assets with no suffix (e.g. GE-Proton11-1.tar.gz)
+# and aarch64 assets with an "-aarch64" suffix (GE-Proton11-1-aarch64.tar.gz).
+#
+# Resolution order:
+#   1. GE_PROTON_ARCH override, if set (x86_64/amd64 or aarch64/arm64). An
+#      unrecognized override value is treated as a user error (returns 1).
+#   2. Auto-detected uname -m.
+#   3. An unrecognized CPU falls back to x86_64 with a warning rather than
+#      bailing — someone running this on an exotic host is most likely using a
+#      translation layer (FEX-Emu, box64, qemu-user, ...), which almost always
+#      translates x86_64. Set GE_PROTON_ARCH to choose explicitly.
+#
+# Echoes the suffix (empty for x86_64) on stdout; warnings/errors go to stderr
+# via log(). NOTE: called in a command substitution, so it must never 'exit'
+# directly — that would only exit the subshell. Returns 1 to signal a hard error.
+resolve_arch_suffix() {
+	local requested="${GE_PROTON_ARCH:-$(uname -m)}"
+
+	case "$requested" in
+		x86_64|amd64)  echo "" ;;
+		aarch64|arm64) echo "-aarch64" ;;
+		*)
+			if [[ -n "${GE_PROTON_ARCH:-}" ]]; then
+				log "Error: Unrecognized GE_PROTON_ARCH '$GE_PROTON_ARCH' (expected x86_64 or aarch64)." "$RED"
+				return 1
+			fi
+			log "Warning: Unsupported CPU architecture '$requested'; assuming x86_64." "$YELLOW"
+			log "Set GE_PROTON_ARCH=aarch64 (or x86_64) to choose the build explicitly." "$YELLOW"
+			echo ""
+			;;
+	esac
+}
+
 # Function to get latest GE-Proton version and URLs
 get_latest_release() {
 	local compat_dir_param="$1"  # Pass COMPAT_DIR as parameter
@@ -220,10 +258,8 @@ get_latest_release() {
 	debug_log "API URL: $GH_API_URL"
 	debug_log "Temp dir: $TMP_DIR"
 
-	release_info=$(curl -s -w "%{http_code}" "$GH_API_URL" -o "$TMP_DIR/release.json" 2>&1)
-	http_code="${release_info: -3}"
+	http_code=$(curl -s -o "$TMP_DIR/release.json" -w "%{http_code}" "$GH_API_URL" 2>/dev/null) || http_code="000"
 	debug_log "HTTP response code: $http_code"
-	debug_log "curl output: $release_info"
 
 	if [[ ! -f "$TMP_DIR/release.json" ]]; then
 		log "Error: Failed to create release.json file" "$RED"
@@ -246,27 +282,58 @@ get_latest_release() {
 	fi
 
 	debug_log "Starting JSON parsing"
+
+	# As of GE-Proton11-1, upstream ships both x86_64 and aarch64 builds, so each
+	# release now has two .tar.gz and two .sha512sum assets. Select the asset
+	# matching this machine's architecture (or GE_PROTON_ARCH) by its exact
+	# filename rather than just "ends with .tar.gz", which would (and did) grab
+	# both at once.
+	local arch_suffix
+	if ! arch_suffix=$(resolve_arch_suffix); then
+		# Invalid explicit GE_PROTON_ARCH override; message already shown.
+		exit 1
+	fi
+	debug_log "Arch: uname -m=$(uname -m), GE_PROTON_ARCH='${GE_PROTON_ARCH:-<unset>}', suffix '${arch_suffix:-<none>}'"
+
+	local want_tarball want_checksum
 	if command -v jq >/dev/null 2>&1; then
 		debug_log "Using jq for JSON parsing"
 		version=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
 		debug_log "jq version result: $version"
-		tarball_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' 2>/dev/null || echo "")
+
+		want_tarball="${version}${arch_suffix}.tar.gz"
+		want_checksum="${version}${arch_suffix}.sha512sum"
+		debug_log "Matching tarball asset:  $want_tarball"
+		debug_log "Matching checksum asset: $want_checksum"
+
+		tarball_url=$(echo "$release_info" | jq -r --arg want "$want_tarball" '.assets[] | select(.name == $want) | .browser_download_url' 2>/dev/null || echo "")
 		debug_log "jq tarball_url result: $tarball_url"
-		checksum_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | endswith(".sha512sum")) | .browser_download_url' 2>/dev/null || echo "")
+		checksum_url=$(echo "$release_info" | jq -r --arg want "$want_checksum" '.assets[] | select(.name == $want) | .browser_download_url' 2>/dev/null || echo "")
 		debug_log "jq checksum_url result: $checksum_url"
 	else
 		debug_log "Using grep/cut for JSON parsing"
-		if grep -P >/dev/null 2>&1 <<< "test"; then
+		local all_tarball_urls all_checksum_urls
+		if printf 'x' | grep -qP 'x' 2>/dev/null; then
 			debug_log "Using grep -P (Perl regex)"
 			version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+' 2>/dev/null || echo "")
-			tarball_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz' 2>/dev/null || echo "")
-			checksum_url=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum' 2>/dev/null || echo "")
+			all_tarball_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz' 2>/dev/null || echo "")
+			all_checksum_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum' 2>/dev/null || echo "")
 		else
 			debug_log "Using basic grep"
 			version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
-			tarball_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
-			checksum_url=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
+			all_tarball_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' 2>/dev/null | cut -d'"' -f4 || echo "")
+			all_checksum_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' 2>/dev/null | cut -d'"' -f4 || echo "")
 		fi
+
+		want_tarball="${version}${arch_suffix}.tar.gz"
+		want_checksum="${version}${arch_suffix}.sha512sum"
+		debug_log "Matching tarball asset:  $want_tarball"
+		debug_log "Matching checksum asset: $want_checksum"
+
+		# Pick the URL whose filename exactly matches our architecture's asset.
+		tarball_url=$(grep -F -- "/$want_tarball" <<< "$all_tarball_urls" | head -n1 || echo "")
+		checksum_url=$(grep -F -- "/$want_checksum" <<< "$all_checksum_urls" | head -n1 || echo "")
+
 		debug_log "grep/cut version result: $version"
 		debug_log "grep/cut tarball_url result: $tarball_url"
 		debug_log "grep/cut checksum_url result: $checksum_url"
@@ -458,18 +525,72 @@ install_ge_proton() {
 		exit 1
 	}
 
-	# --- Version Rotation ---
+	# --- Determine the tarball's top-level directory up front ---
+	# Detect it from the tarball itself rather than assuming it equals the
+	# version tag — arch-suffixed builds (e.g. aarch64) use a different internal
+	# directory name. Read the full listing (no early-exit pipe) and take the
+	# first path component.
+	local tar_listing extracted_top
+	tar_listing=$(tar -tzf "$tarball_path" 2>/dev/null || true)
+	extracted_top="${tar_listing%%/*}"
+	if [[ -z "$extracted_top" || "$extracted_top" == "." ]]; then
+		extracted_top="$version"
+	fi
+	debug_log "Tarball top-level directory: $extracted_top"
 
-	# Read current Latest version before we touch anything
+	# Run filesystem ops as the target user when we're root acting on someone
+	# else's Steam dir (empty prefix otherwise). Passing args through an array
+	# avoids the shell-quoting/injection hazards of building a wrapper script.
+	local run_as=()
+	if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
+		run_as=(sudo -u "$user")
+	fi
+
+	# --- Extract into a staging dir on the SAME filesystem as the target ---
+	# Extracting BEFORE any rotation means a failed or interrupted extraction
+	# never destroys the existing Latest/Previous. The final swap is then a
+	# same-filesystem rename.
+	local staging_dir="$target_dir/.ge-proton-staging.$$"
+	debug_log "Staging directory: $staging_dir"
+	rm -rf "$staging_dir" 2>/dev/null || true  # clear any stale staging from an interrupted run
+	"${run_as[@]}" mkdir -p "$staging_dir" 2>/dev/null || {
+		log "Error: Cannot create staging directory $staging_dir" "$RED"
+		exit 1
+	}
+
+	log "Extracting $version to $LATEST_DIR..." "$NC"
+	debug_log "Extract: tar -xzf $tarball_path -C $staging_dir (as $user)"
+	local extract_output
+	extract_output=$("${run_as[@]}" tar -xzf "$tarball_path" -C "$staging_dir" 2>&1) || {
+		log "Error: Extraction failed${user:+ as user $user}" "$RED"
+		debug_log "Extraction output: $extract_output"
+		rm -rf "$staging_dir" 2>/dev/null || true
+		exit 1
+	}
+
+	local staged_path="$staging_dir/$extracted_top"
+	if [[ ! -d "$staged_path" ]]; then
+		log "Error: Expected extracted directory $staged_path not found" "$RED"
+		debug_log "Staging contents: $(ls -la "$staging_dir" 2>&1)"
+		rm -rf "$staging_dir" 2>/dev/null || true
+		exit 1
+	fi
+
+	local file_count
+	file_count=$(find "$staged_path" -type f | wc -l)
+	debug_log "Files extracted: $file_count"
+	if [[ "$file_count" -lt "$MIN_FILES" ]]; then
+		log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
+	fi
+
+	# --- Now that a good build is staged, rotate Latest → Previous ---
 	local current_latest_version
 	current_latest_version=$(read_installed_version "$latest_path")
 	debug_log "Current Latest version: ${current_latest_version:-none}"
 
-	# Rotate Latest → Previous (if Latest exists and has a different version)
 	if [[ -d "$latest_path" && -n "$current_latest_version" ]]; then
 		log "Rotating $LATEST_DIR ($current_latest_version) → $PREVIOUS_DIR..." "$NC"
 
-		# Remove existing Previous if present
 		if [[ -d "$previous_path" ]]; then
 			local previous_version
 			previous_version=$(read_installed_version "$previous_path")
@@ -479,99 +600,53 @@ install_ge_proton() {
 			}
 		fi
 
-		# Move Latest → Previous
 		mv "$latest_path" "$previous_path" 2>/dev/null || {
 			log "Error: Failed to rotate $LATEST_DIR → $PREVIOUS_DIR" "$RED"
+			rm -rf "$staging_dir" 2>/dev/null || true
 			exit 1
 		}
 
-		# Rewrite the VDF in Previous to reflect its new role
 		write_vdf "$previous_path" "$PREVIOUS_INTERNAL" "$PREVIOUS_DISPLAY_PREFIX"
-
 		if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
 			chown "$user:$user" "$previous_path/compatibilitytool.vdf" 2>/dev/null || true
 		fi
 
 		log "Previous version: $current_latest_version" "$GREEN"
-	fi
-
-	# --- Extract New Latest ---
-
-	log "Extracting $version to $latest_path as user $user..." "$NC"
-	debug_log "Tarball path: $tarball_path"
-	debug_log "Extract command: tar -xzf $tarball_path -C $target_dir"
-
-	if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
-		debug_log "Extracting as user $user using sudo"
-		local extract_script="$TMP_DIR/extract.sh"
-		echo "#!/bin/bash" > "$extract_script"
-		echo "cd '$TMP_DIR' && tar -xzf '$tarball_name' -C '$target_dir'" >> "$extract_script"
-		chmod +x "$extract_script"
-
-		local extract_output
-		extract_output=$(sudo -u "$user" "$extract_script" 2>&1) || {
-			log "Error: Extraction failed as user $user" "$RED"
-			debug_log "Extraction output: $extract_output"
-			exit 1
-		}
 	else
-		debug_log "Extracting directly"
-		local extract_output
-		extract_output=$(tar -xzf "$tarball_path" -C "$target_dir" 2>&1) || {
-			log "Error: Extraction failed" "$RED"
-			debug_log "Extraction output: $extract_output"
-			exit 1
-		}
+		# No usable Latest to rotate; clear any stale/partial Latest so the swap
+		# below creates a clean directory instead of nesting inside it.
+		rm -rf "$latest_path" 2>/dev/null || true
 	fi
 
-	# The tarball extracts to a versioned directory (e.g., GE-Proton10-30)
-	local extracted_dir="$target_dir/$version"
-	if [[ ! -d "$extracted_dir" ]]; then
-		log "Error: Expected extraction directory $extracted_dir not found" "$RED"
-		debug_log "Target directory contents: $(ls -la "$target_dir")"
-		exit 1
-	fi
-
-	# Rename versioned directory → static Latest directory
-	debug_log "Renaming $extracted_dir → $latest_path"
-	mv "$extracted_dir" "$latest_path" 2>/dev/null || {
-		log "Error: Failed to rename $extracted_dir to $latest_path" "$RED"
+	# --- Swap the staged build into place (same-filesystem rename) ---
+	debug_log "Moving $staged_path → $latest_path"
+	mv "$staged_path" "$latest_path" 2>/dev/null || {
+		log "Error: Failed to move staged build into $latest_path" "$RED"
+		rm -rf "$staging_dir" 2>/dev/null || true
 		exit 1
 	}
+	rm -rf "$staging_dir" 2>/dev/null || true
 
-	# Fix ownership if running as root for another user
+	# Fix ownership of the new Latest if running as root for another user
 	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
 		chown -R "$user:$user" "$latest_path" 2>/dev/null || {
 			log "Warning: Failed to set ownership of $latest_path to $user" "$YELLOW"
 		}
 	fi
 
-	local file_count
-	file_count=$(find "$latest_path" -type f | wc -l)
-	debug_log "Files extracted: $file_count"
-	debug_log "Extracted files (first 10): $(find "$latest_path" -type f | head -n 10)"
-
-	if [[ "$file_count" -lt "$MIN_FILES" ]]; then
-		log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
-	fi
-
-	# --- Write VDF and State File ---
-
+	# --- Write VDF and state file ---
 	write_vdf "$latest_path" "$LATEST_INTERNAL" "$LATEST_DISPLAY_PREFIX"
 	debug_log "Wrote VDF: internal=$LATEST_INTERNAL display=$LATEST_DISPLAY_PREFIX"
 
-	# Write version state file
 	echo "$version" > "$latest_path/$VERSION_FILE"
 	debug_log "Wrote version state file: $version"
 
-	# Fix ownership of our new files
 	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
 		chown "$user:$user" "$latest_path/compatibilitytool.vdf" "$latest_path/$VERSION_FILE" 2>/dev/null || true
 	fi
 
 	log "$version installed as '$LATEST_DISPLAY_PREFIX'!" "$GREEN"
 
-	# Check if this is the first install (no Previous means Steam hasn't seen this tool before)
 	if [[ -z "$current_latest_version" ]]; then
 		log "==> Note: Steam requires a restart for the initial setup of $LATEST_DISPLAY_PREFIX." "$GREEN"
 		log "In Steam: Steam > Settings > Compatibility > Set 'Default compatibility tool' to '$LATEST_DISPLAY_PREFIX'." "$GREEN"
@@ -711,6 +786,10 @@ fi
 TMP_DIR=$(make_secure_temp)
 debug_log "Using temp directory: $TMP_DIR"
 
+# Install cleanup trap right after creation so the temp dir can't leak if any
+# of the setup below fails.
+trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "Warning: Failed to clean up $TMP_DIR" "$RED"' EXIT
+
 if [[ "$EUID" -eq 0 && "$TARGET_USER" != "root" ]]; then
 	debug_log "Setting permissions on temp directory for $TARGET_USER"
 	chown "$TARGET_USER:$TARGET_USER" "$TMP_DIR" || {
@@ -721,8 +800,6 @@ if [[ "$EUID" -eq 0 && "$TARGET_USER" != "root" ]]; then
 		log "Warning: Failed to set permissions on temp directory" "$RED"
 	}
 fi
-
-trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "Warning: Failed to clean up $TMP_DIR" "$RED"' EXIT
 
 get_latest_release "$COMPAT_DIR"
 
@@ -754,10 +831,6 @@ if [[ "$INSTALL_NEEDED" -eq 1 ]]; then
 		debug_log "Tarball name returned: $tarball_name"
 		debug_log "Full tarball path: $TMP_DIR/$tarball_name"
 		debug_log "Tarball check before install: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
-		if [[ "$tarball_name" =~ ^Downloading ]]; then
-			log "Error: Invalid tarball name detected: $tarball_name" "$RED"
-			exit 1
-		fi
 		install_ge_proton "$TARGET_USER" "$COMPAT_DIR" "$tarball_name" "$version"
 	fi
 else
