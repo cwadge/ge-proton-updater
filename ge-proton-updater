@@ -216,11 +216,19 @@ fi
 echo "$compat_dir"
 }
 
-# Resolve which GE-Proton build to fetch, as an asset-name suffix.
-# Upstream publishes x86_64 assets with no suffix (e.g. GE-Proton11-1.tar.gz)
-# and aarch64 assets with an "-aarch64" suffix (GE-Proton11-1-aarch64.tar.gz).
+# Resolve which GE-Proton build to fetch, as an ordered list of asset-name
+# suffixes to try.
 #
-# Resolution order:
+# Upstream's asset naming has moved more than once: pre-11 releases were
+# x86_64-only and unsuffixed (GE-Proton10-30.tar.gz); GE-Proton11-1 added
+# aarch64 builds with an "-aarch64" suffix while x86_64 stayed bare; and by
+# GE-Proton11-5 the x86_64 assets carry an explicit "-x86_64" suffix
+# (GE-Proton11-5-x86_64.tar.gz). Hard-coding any one of those spellings breaks
+# the day it changes again, so try the known spellings in order and take the
+# first that actually exists in the release. Matching is still by exact
+# filename per candidate, so we never grab both architectures at once.
+#
+# Resolution order for which architecture we want:
 #   1. GE_PROTON_ARCH override, if set (x86_64/amd64 or aarch64/arm64). An
 #      unrecognized override value is treated as a user error (returns 1).
 #   2. Auto-detected uname -m.
@@ -229,15 +237,16 @@ echo "$compat_dir"
 #      translation layer (FEX-Emu, box64, qemu-user, ...), which almost always
 #      translates x86_64. Set GE_PROTON_ARCH to choose explicitly.
 #
-# Echoes the suffix (empty for x86_64) on stdout; warnings/errors go to stderr
-# via log(). NOTE: called in a command substitution, so it must never 'exit'
-# directly — that would only exit the subshell. Returns 1 to signal a hard error.
-resolve_arch_suffix() {
+# Populates the global ARCH_SUFFIXES array (an empty element means "no suffix").
+# Called directly rather than in a command substitution so the array survives;
+# returns 1 to signal a hard error.
+ARCH_SUFFIXES=()
+resolve_arch_suffixes() {
 	local requested="${GE_PROTON_ARCH:-$(uname -m)}"
 
 	case "$requested" in
-		x86_64|amd64)  echo "" ;;
-		aarch64|arm64) echo "-aarch64" ;;
+		x86_64|amd64)  ARCH_SUFFIXES=("-x86_64" "-amd64" "") ;;
+		aarch64|arm64) ARCH_SUFFIXES=("-aarch64" "-arm64") ;;
 		*)
 			if [[ -n "${GE_PROTON_ARCH:-}" ]]; then
 				log "Error: Unrecognized GE_PROTON_ARCH '$GE_PROTON_ARCH' (expected x86_64 or aarch64)." "$RED"
@@ -245,7 +254,7 @@ resolve_arch_suffix() {
 			fi
 			log "Warning: Unsupported CPU architecture '$requested'; assuming x86_64." "$YELLOW"
 			log "Set GE_PROTON_ARCH=aarch64 (or x86_64) to choose the build explicitly." "$YELLOW"
-			echo ""
+			ARCH_SUFFIXES=("-x86_64" "-amd64" "")
 			;;
 	esac
 }
@@ -283,61 +292,62 @@ get_latest_release() {
 
 	debug_log "Starting JSON parsing"
 
-	# As of GE-Proton11-1, upstream ships both x86_64 and aarch64 builds, so each
-	# release now has two .tar.gz and two .sha512sum assets. Select the asset
-	# matching this machine's architecture (or GE_PROTON_ARCH) by its exact
-	# filename rather than just "ends with .tar.gz", which would (and did) grab
-	# both at once.
-	local arch_suffix
-	if ! arch_suffix=$(resolve_arch_suffix); then
+	# Upstream now ships both x86_64 and aarch64 builds, so a release has two
+	# .tar.gz and two .sha512sum assets. Pull every asset URL once, then pick the
+	# pair whose filenames exactly match this machine's architecture (or
+	# GE_PROTON_ARCH) — "ends with .tar.gz" would (and did) grab both at once.
+	if ! resolve_arch_suffixes; then
 		# Invalid explicit GE_PROTON_ARCH override; message already shown.
 		exit 1
 	fi
-	debug_log "Arch: uname -m=$(uname -m), GE_PROTON_ARCH='${GE_PROTON_ARCH:-<unset>}', suffix '${arch_suffix:-<none>}'"
+	debug_log "Arch: uname -m=$(uname -m), GE_PROTON_ARCH='${GE_PROTON_ARCH:-<unset>}'"
+	debug_log "Asset suffix candidates (in order): [${ARCH_SUFFIXES[*]}]"
 
-	local want_tarball want_checksum
+	local asset_urls
 	if command -v jq >/dev/null 2>&1; then
 		debug_log "Using jq for JSON parsing"
 		version=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
-		debug_log "jq version result: $version"
-
-		want_tarball="${version}${arch_suffix}.tar.gz"
-		want_checksum="${version}${arch_suffix}.sha512sum"
-		debug_log "Matching tarball asset:  $want_tarball"
-		debug_log "Matching checksum asset: $want_checksum"
-
-		tarball_url=$(echo "$release_info" | jq -r --arg want "$want_tarball" '.assets[] | select(.name == $want) | .browser_download_url' 2>/dev/null || echo "")
-		debug_log "jq tarball_url result: $tarball_url"
-		checksum_url=$(echo "$release_info" | jq -r --arg want "$want_checksum" '.assets[] | select(.name == $want) | .browser_download_url' 2>/dev/null || echo "")
-		debug_log "jq checksum_url result: $checksum_url"
+		asset_urls=$(echo "$release_info" | jq -r '.assets[].browser_download_url' 2>/dev/null || echo "")
 	else
 		debug_log "Using grep/cut for JSON parsing"
-		local all_tarball_urls all_checksum_urls
 		if printf 'x' | grep -qP 'x' 2>/dev/null; then
 			debug_log "Using grep -P (Perl regex)"
 			version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+' 2>/dev/null || echo "")
-			all_tarball_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.tar\.gz' 2>/dev/null || echo "")
-			all_checksum_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+\.sha512sum' 2>/dev/null || echo "")
+			asset_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+' 2>/dev/null || echo "")
 		else
 			debug_log "Using basic grep"
 			version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
-			all_tarball_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' 2>/dev/null | cut -d'"' -f4 || echo "")
-			all_checksum_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*\.sha512sum"' 2>/dev/null | cut -d'"' -f4 || echo "")
+			asset_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*"' 2>/dev/null | cut -d'"' -f4 || echo "")
 		fi
-
-		want_tarball="${version}${arch_suffix}.tar.gz"
-		want_checksum="${version}${arch_suffix}.sha512sum"
-		debug_log "Matching tarball asset:  $want_tarball"
-		debug_log "Matching checksum asset: $want_checksum"
-
-		# Pick the URL whose filename exactly matches our architecture's asset.
-		tarball_url=$(grep -F -- "/$want_tarball" <<< "$all_tarball_urls" | head -n1 || echo "")
-		checksum_url=$(grep -F -- "/$want_checksum" <<< "$all_checksum_urls" | head -n1 || echo "")
-
-		debug_log "grep/cut version result: $version"
-		debug_log "grep/cut tarball_url result: $tarball_url"
-		debug_log "grep/cut checksum_url result: $checksum_url"
 	fi
+
+	debug_log "Parsed version: $version"
+	debug_log "Assets found in release: $(grep -c . <<< "$asset_urls" || true)"
+
+	tarball_url=""
+	checksum_url=""
+	if [[ -n "$version" ]]; then
+		local suffix want_tarball want_checksum candidate_tarball candidate_checksum
+		for suffix in "${ARCH_SUFFIXES[@]}"; do
+			want_tarball="${version}${suffix}.tar.gz"
+			want_checksum="${version}${suffix}.sha512sum"
+			# Leading slash anchors the match to the filename component of the URL,
+			# so the bare "GE-Proton11-5.tar.gz" candidate can't match the suffixed
+			# "GE-Proton11-5-x86_64.tar.gz".
+			candidate_tarball=$(grep -F -- "/$want_tarball" <<< "$asset_urls" | head -n1 || true)
+			candidate_checksum=$(grep -F -- "/$want_checksum" <<< "$asset_urls" | head -n1 || true)
+			if [[ -n "$candidate_tarball" && -n "$candidate_checksum" ]]; then
+				tarball_url="$candidate_tarball"
+				checksum_url="$candidate_checksum"
+				debug_log "Matched asset suffix '${suffix:-<none>}': $want_tarball"
+				break
+			fi
+			debug_log "No complete match for suffix '${suffix:-<none>}' (tarball=${candidate_tarball:-none}, checksum=${candidate_checksum:-none})"
+		done
+	fi
+
+	debug_log "Selected tarball_url: ${tarball_url:-none}"
+	debug_log "Selected checksum_url: ${checksum_url:-none}"
 
 	if [[ -z "$version" ]]; then
 		log "Error: Failed to parse version from GitHub API" "$RED"
@@ -348,8 +358,31 @@ get_latest_release() {
 	debug_log "Successfully parsed version: $version"
 	debug_log "Checking for assets availability"
 
-	# Check if assets are available
+	# Check if assets are available. Distinguish two very different failures:
+	# a release whose assets are still uploading (wait and retry), versus a
+	# release that has assets under names we don't recognize (upstream renamed
+	# something and this script needs a new candidate suffix). Reporting the
+	# second as the first sends you to the releases page to stare at assets that
+	# are plainly right there.
 	if [[ -z "$tarball_url" || -z "$checksum_url" ]]; then
+		local any_tarball
+		any_tarball=$(grep -F -- '.tar.gz' <<< "$asset_urls" | head -n1 || true)
+
+		if [[ -n "$any_tarball" ]]; then
+			log "Error: Release $version has assets, but none match the expected names for this architecture" "$RED"
+			local suffix
+			for suffix in "${ARCH_SUFFIXES[@]}"; do
+				log "  Looked for: ${version}${suffix}.tar.gz + ${version}${suffix}.sha512sum" "$YELLOW"
+			done
+			log "  Assets actually present:" "$YELLOW"
+			while IFS= read -r url; do
+				[[ -z "$url" ]] && continue
+				log "    $(basename "$url")" "$YELLOW"
+			done <<< "$asset_urls"
+			log "Upstream has likely renamed their release assets; this script needs updating." "$RED"
+			exit 1
+		fi
+
 		log "Warning: Latest release ($version) doesn't have binary assets available yet" "$YELLOW"
 		log "This usually happens when a release is just published but assets are still being uploaded" "$YELLOW"
 		log "Please try again in a few minutes, or check: https://github.com/GloriousEggroll/proton-ge-custom/releases/latest" "$YELLOW"
