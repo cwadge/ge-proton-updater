@@ -15,10 +15,12 @@ A Bash script to automatically download, verify, and install the latest [GE-Prot
 - Automatically rotates the previous version to `GE-Proton-Previous` (**"Proton GE Previous"**) as a fallback in case of critical bugs.
 - After initial setup, **no Steam restart is required** for updates — the static internal name means Steam uses the new build immediately.
 - Tracks installed versions via a state file (`.ge-proton-version`) to avoid redundant downloads.
-- Cleans up legacy versioned directories (e.g. `GE-Proton10-27`) from older script versions.
-- Handles user ownership (no root-owned files in your home dir).
+- Cleans up versioned directories (e.g. `GE-Proton10-27`) left by older script versions, once, and never one that Steam still has a game or the default mapped to. Versions you install with ProtonUp-Qt or by hand are safe to keep alongside it.
+- **Runs as the owner of the Steam directory**: when started as root (e.g. by apt-up or pac-up), it switches to that user before touching anything, so root never writes into your home dir.
 - Skips root installs as accidental unless explicitly allowed (`--force-root`).
-- **Dry-run aware**: checks `IS_DRY_RUN` when run as a hook and reports what would happen without downloading or installing anything.
+- Skips cleanly when there's no native Steam installation (and points Flatpak Steam users to the right package), so a hook copied to every machine does nothing on servers.
+- **Unattended-friendly**: network timeouts so a stalled download can't hang the parent update run, and plain output (no colors or progress bars) when not on a terminal.
+- **Dry-run aware**: checks `IS_DRY_RUN` when run as a hook and reports what would happen without downloading or changing anything.
 - Debug mode for troubleshooting (`--debug`).
 
 ## How It Works
@@ -35,6 +37,7 @@ The actual GE-Proton version installed under each slot is tracked internally via
 
 ## Prerequisites
 - `Bash`, `curl`, `tar`, `sha512sum` (standard on most distros).
+- `runuser` (part of util-linux, present on all mainstream distros) when run as root; `sudo` works as a fallback.
 - `Steam` installed natively (`.deb`, package manager, etc.).
 - A supported CPU architecture: **x86_64** (amd64) or **aarch64** (arm64). The script auto-detects yours and fetches the matching build. You can force a specific build with `GE_PROTON_ARCH` (see Usage) — handy under a translation layer (FEX-Emu, box64, qemu-user) or to stage a build for another machine. An unrecognized CPU falls back to x86_64 with a warning rather than failing.
 
@@ -52,10 +55,10 @@ Latest version: GE-Proton10-30
 Rotating GE-Proton-Latest (GE-Proton10-29) → GE-Proton-Previous...
 Previous version: GE-Proton10-29
 Downloading GE-Proton10-30.tar.gz...
-/tmp/ge-proton-update.BJfprL/GE-Proton10-30.tar.gz          100% 478.83M 90.1MB/s in 5.2s
+######################################################################## 100.0%
 Verifying checksum...
 Checksum verification passed
-Extracting GE-Proton10-30 to /home/chris/.steam/steam/compatibilitytools.d/GE-Proton-Latest as user chris...
+Extracting GE-Proton10-30 to GE-Proton-Latest...
 GE-Proton10-30 installed as 'Proton GE Latest'!
 ==> Updated in-place. No Steam restart required.
 Done!
@@ -88,6 +91,8 @@ EXPORT_VARS="GE_PROTON_TARGET=/home/youruser/.steam/steam/compatibilitytools.d"
 
 3. Run `sudo apt-up` or `sudo pac-up`.
 
+The hook file must be world-readable (`chmod 755`, as above): when apt-up or pac-up runs it as root, the script re-runs itself as the owner of the Steam directory.
+
 ### Dry-Run Awareness
 
 When installed as an apt-up or pac-up hook, the script automatically respects dry-run mode. Both parent scripts export `IS_DRY_RUN=true` before running any hooks when `--dry-run` is active. The updater checks this variable and, if set, queries the GitHub API for the latest version and reports what it would do — without downloading, extracting, or modifying anything:
@@ -107,13 +112,15 @@ No special configuration is needed — dry-run awareness is built in.
 ## Usage
 - **Standalone:** `ge-proton-updater` (updates for the current user).
 
-- **Root with Custom Target:** `GE_PROTON_TARGET=/path/to/dir sudo ge-proton-updater`.
+- **Root with Custom Target:** `sudo GE_PROTON_TARGET=/path/to/dir ge-proton-updater`. (The variable has to come after `sudo`; sudo drops variables set before it.) The script works out who owns the target and runs as that user. A system-wide target such as `/usr/share/steam/compatibilitytools.d` stays root.
 
 - **Force Root Install:** `ge-proton-updater --force-root` (if you're running Steam as root for some wild and unforeseen reason).
 
 - **Force Architecture:** `GE_PROTON_ARCH=aarch64 ge-proton-updater` (or `x86_64`) — overrides CPU auto-detection and fetches that build regardless of the host. Useful when running x86_64 GE-Proton under a translation layer on ARM (or vice versa), or to stage a build for a different machine. Accepts `x86_64`/`amd64` and `aarch64`/`arm64`; an unrecognized value is treated as an error.
 
 - **Dry-Run:** `ge-proton-updater --dry-run` — checks for a newer version and reports what would happen without downloading or modifying anything.
+
+- **Help:** `ge-proton-updater --help`.
 
 - **Debug Mode:** Something going wrong? Run `ge-proton-updater --debug` for full verbiage.
 
@@ -131,10 +138,12 @@ After the **first** GE-Proton install, Steam needs to be told to use it:
 If a new build causes issues, you can switch to `Proton GE Previous` as a fallback until the next release.
 
 ## Migrating from Older Versions
-If you were previously using versioned directory names (e.g. `GE-Proton10-27`, `GE-Proton10-28`), the script will:
+If you were previously using versioned directory names (e.g. `GE-Proton10-27`, `GE-Proton10-28`), the script will, on its first run:
 
 1. Install the latest version to `GE-Proton-Latest/` with the new static naming.
-2. Automatically clean up any legacy versioned directories.
+2. Remove the old versioned directories, except any that Steam still has a game or the default compatibility tool mapped to. If it can't read Steam's config to check, it leaves them all in place and lists them.
+
+This cleanup happens only once. Afterwards, versioned directories (from ProtonUp-Qt, or ones you pin by hand for a particular game) are never touched.
 
 After migrating, you'll need to restart Steam once and select `Proton GE Latest` as your compatibility tool. From that point forward, updates are seamless.
 
@@ -148,15 +157,16 @@ e.g. edit `/etc/apt-up.conf` or `/etc/pac-up.conf`:
 EXPORT_VARS="IGNORE_CC_MISMATCH=1 GE_PROTON_TARGET=/home/gamer/.steam/steam/compatibilitytools.d"
 ```
 
-2. Run `sudo apt-up` or `sudo pac-up`.
+2. Run `sudo apt-up` or `sudo pac-up`. The script switches to the gamer's account (the owner of that directory) before installing, so everything it creates belongs to the gamer.
 
 ### Standalone, Multiple Gamers:
-Run the script once per user with `GE_PROTON_TARGET` as a CLI variable:
+Run the script once per user as root, with `GE_PROTON_TARGET` after `sudo`:
 ```bash
-GE_PROTON_TARGET=/home/gamer1/.steam/steam/compatibilitytools.d ge-proton-updater
-GE_PROTON_TARGET=/home/gamer2/.steam/steam/compatibilitytools.d ge-proton-updater
+sudo GE_PROTON_TARGET=/home/gamer1/.steam/steam/compatibilitytools.d ge-proton-updater
+sudo GE_PROTON_TARGET=/home/gamer2/.steam/steam/compatibilitytools.d ge-proton-updater
 ...
 ```
+Each run switches to that gamer's account before installing.
 
 ### Called By A Hook In An Update Script, Multiple Gamers:
 Use multiple copies of the script with hard-coded targets:

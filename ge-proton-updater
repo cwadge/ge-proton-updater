@@ -9,14 +9,19 @@
 #   - In-script: GE_PROTON_TARGET="/custom/path" (uncomment below)
 #   - Export: export GE_PROTON_TARGET="/home/user/.steam/steam/compatibilitytools.d"
 #   - CLI: GE_PROTON_TARGET="/path" ./50-ge-proton
+#   - With sudo: sudo GE_PROTON_TARGET="/path" ge-proton-updater
+#     (sudo drops variables set before it)
 # - Set GE_PROTON_ARCH to force a specific build (x86_64 or aarch64) regardless
 #   of the detected CPU — useful under a translation layer (FEX-Emu, box64,
 #   qemu-user, etc.) or to stage a build for another machine. Auto-detected if
 #   unset; an unrecognized CPU falls back to x86_64 with a warning.
+# - When run as root (e.g. as a hook), the script switches to the user who owns
+#   the target Steam directory before doing anything, so root never writes
+#   into a user's home.
 # - Use --force-root to allow installation to /root/.steam/... as root
 # - Use --debug for verbose output
 # - Use --dry-run to check for updates and report what would happen without
-#   downloading or installing anything (also honoured via IS_DRY_RUN=true,
+#   downloading or changing anything (also honoured via IS_DRY_RUN=true,
 #   which apt-up/pac-up export automatically when run with --dry-run)
 # - Designed for apt-up/pac-up hooks or standalone use
 #
@@ -25,12 +30,6 @@
 # restart to pick up new GE-Proton versions after initial setup.
 
 set -euo pipefail  # Exit on errors, unset vars, and pipe failures
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m'  # No color
 
 # GitHub API URL for latest GE-Proton release
 GH_API_URL="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
@@ -46,175 +45,154 @@ PREVIOUS_INTERNAL="GE-Proton-Previous"
 LATEST_DISPLAY_PREFIX="Proton GE Latest"
 PREVIOUS_DISPLAY_PREFIX="Proton GE Previous"
 VERSION_FILE=".ge-proton-version"
-
-# Debug mode flag
-DEBUG=0
+STAGING_PREFIX=".ge-proton-staging"
 
 # Minimum files expected after extraction (configurable via env var)
 MIN_FILES=${MIN_FILES:-5}
 
-# Use apt-up's cecho if available, else fallback to printf
-if declare -f cecho >/dev/null 2>&1; then
-	log() { cecho "$1" "$2"; }
+# Network settings: give up on a connection that doesn't open within 15s, or a
+# download that stays under 10 KB/s for a minute. A stalled transfer must never
+# hang the parent update run.
+CURL_NET=(--connect-timeout 15 --speed-limit 10240 --speed-time 60 --retry 2 --retry-delay 5)
+
+DEBUG=0
+FORCE_ROOT=0
+DRY_RUN="${IS_DRY_RUN:-false}"
+
+# Colors only when stderr (where all output goes) is a terminal, so cron mail
+# and logs stay plain.
+if [[ -t 2 ]]; then
+	RED='\033[0;31m'
+	GREEN='\033[0;32m'
+	YELLOW='\033[0;33m'
+	NC='\033[0m'
 else
-	log() { printf "%b%s%b\n" "${2:-$NC}" "$1" "$NC" >&2; }
+	RED='' GREEN='' YELLOW='' NC=''
 fi
 
-# Debug logging function
+log() { printf '%b%s%b\n' "${2:-}" "$1" "${NC}" >&2; }
+
 debug_log() {
 	if [[ "$DEBUG" -eq 1 ]]; then
 		log "DEBUG: $1" "$YELLOW"
 	fi
 }
 
-# Function to create a secure temp directory
-make_secure_temp() {
-	if command -v mktemp >/dev/null 2>&1; then
-		mktemp -d /tmp/ge-proton-update.XXXXXX
-	else
-		local base_dir="${TMPDIR:-/tmp}"
-		local template="ge-proton-update.XXXXXX"
-		local dir
-		local rand
-		for _ in {1..10}; do
-			rand=$(od -An -N4 -tx /dev/urandom | tr -d ' \n')
-			dir="$base_dir/${template/XXXXXX/$rand}"
-			if mkdir -m 700 "$dir" 2>/dev/null; then
-				echo "$dir"
+show_help() {
+	cat >&2 << 'EOF'
+ge-proton-updater - install and update GE-Proton for native Steam
+
+Usage: ge-proton-updater [--dry-run] [--debug] [--force-root]
+
+  --dry-run     Report what would happen without downloading or changing anything
+  --debug       Verbose output
+  --force-root  Allow installing into root's own Steam directory
+
+Environment:
+  GE_PROTON_TARGET  Install into this compatibilitytools.d directory
+  GE_PROTON_ARCH    Force the x86_64 or aarch64 build
+  IS_DRY_RUN=true   Same as --dry-run (exported by apt-up/pac-up)
+EOF
+}
+
+# --- Ownership and privileges ---
+
+# Prints the user who effectively controls a path: the owner of the nearest
+# non-root-owned directory on the way up from it (the path itself may not exist
+# yet). A root-owned directory inside someone's home still counts as theirs,
+# since they can rename it out of the way. Prints "root" for system paths.
+path_controller() {
+	local p="$1" owner
+	while [[ -n "$p" && "$p" != "/" ]]; do
+		if [[ -e "$p" ]]; then
+			owner=$(stat -c %U "$p" 2>/dev/null || echo root)
+			if [[ "$owner" != "root" ]]; then
+				echo "$owner"
 				return 0
 			fi
-		done
-		log "Error: Failed to create secure temp directory" "$RED"
+		fi
+		p=$(dirname "$p")
+	done
+	echo root
+}
+
+# Re-runs this script as $1 with the same arguments and settings, so every
+# file in that user's Steam directory is created and replaced by that user.
+drop_privileges() {
+	local owner="$1"
+	shift
+	local self
+	self=$(readlink -f "${BASH_SOURCE[0]}")
+
+	if [[ -n "${GE_PROTON_DROPPED:-}" ]]; then
+		log "Error: Still running as root after switching to $owner; refusing to continue" "$RED"
+		exit 1
+	fi
+	export GE_PROTON_DROPPED=1 IS_DRY_RUN="$DRY_RUN" MIN_FILES
+	if [[ -n "${GE_PROTON_TARGET:-}" ]]; then export GE_PROTON_TARGET; fi
+	if [[ -n "${GE_PROTON_ARCH:-}" ]]; then export GE_PROTON_ARCH; fi
+
+	# The caller's working directory (often /root) and temp directory (e.g.
+	# /tmp/user/0 from libpam-tmpdir) may not be accessible to the user.
+	cd /
+	unset TMPDIR TMP TEMP TEMPDIR
+	debug_log "Switching to user $owner to run $self"
+	if command -v runuser >/dev/null 2>&1; then
+		if ! runuser -u "$owner" -- test -r "$self"; then
+			log "Error: $owner can't read $self; make it world-readable (chmod 755)" "$RED"
+			exit 1
+		fi
+		exec runuser -u "$owner" -- /bin/bash "$self" "$@"
+	elif command -v sudo >/dev/null 2>&1; then
+		exec sudo -u "$owner" \
+			--preserve-env=GE_PROTON_DROPPED,IS_DRY_RUN,MIN_FILES,GE_PROTON_TARGET,GE_PROTON_ARCH \
+			-- /bin/bash "$self" "$@"
+	else
+		log "Error: Need runuser or sudo to switch to user $owner" "$RED"
 		exit 1
 	fi
 }
 
-# Function to detect the effective user
-get_effective_user() {
-	if [[ "$EUID" -eq 0 ]]; then
-		if [[ -v SUDO_USER && -n "$SUDO_USER" ]]; then
-			echo "$SUDO_USER"
-		else
-			echo "root"
-		fi
-	else
-		echo "$USER"
-	fi
-}
+# --- Steam detection ---
 
-# Function to infer the target user from GE_PROTON_TARGET or fall back to effective user
-infer_target_user() {
-	local target_dir="$1" effective_user="$2"
-	local inferred_user
-
-	# If target_dir is unset or empty, fallback to effective user immediately
-	if [[ -z "$target_dir" ]]; then
-		debug_log "GE_PROTON_TARGET is unset or empty, using effective user: $effective_user"
-		echo "$effective_user"
-		return 0
-	fi
-
-	# Extract user from path like /home/username/...
-	if [[ "$target_dir" =~ ^/home/([^/]+)/ ]]; then
-		inferred_user="${BASH_REMATCH[1]}"
-		if id "$inferred_user" >/dev/null 2>&1; then
-			debug_log "Inferred user from GE_PROTON_TARGET: $inferred_user"
-			echo "$inferred_user"
-			return 0
-		else
-			log "Warning: Inferred user '$inferred_user' from GE_PROTON_TARGET does not exist, falling back to $effective_user" "$YELLOW"
-		fi
-	else
-		debug_log "GE_PROTON_TARGET ($target_dir) not in /home, using effective user: $effective_user"
-	fi
-
-	# Fallback to effective user
-	echo "$effective_user"
-}
-
-# Function to detect Steam directory or use override
+# Prints the compatibilitytools.d directory for the current user's native Steam,
+# creating it (unless dry-run) if Steam is installed but the directory isn't.
+# Returns 1 if there is no native Steam installation, 2 on error.
 find_steam_dir() {
-	local user="$1" home_dir compat_dir
-
-	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-		if ! sudo -u "$user" true 2>/dev/null; then
-			log "Error: Cannot switch to user $user via sudo" "$RED"
-			exit 1
-		fi
-	fi
-
-	if [[ -v GE_PROTON_TARGET && -n "${GE_PROTON_TARGET}" ]]; then
-		if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
-			if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-				sudo -u "$user" mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
-					log "Error: Cannot create $GE_PROTON_TARGET as $user" "$RED"
-									exit 1
-								}
-							else
-								mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
-									log "Error: Cannot create $GE_PROTON_TARGET" "$RED"
-																	exit 1
-																}
-			fi
-			echo "$GE_PROTON_TARGET"
-			return 0
-		else
-			log "Warning: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable" "$RED"
-		fi
-	fi
-
-	home_dir=$(getent passwd "$user" | cut -d: -f6)
+	local home_dir base compat_dir
+	home_dir=$(getent passwd "$(id -un)" | cut -d: -f6) || home_dir="${HOME:-}"
 	local steam_base_paths=(
-	"$home_dir/.steam/steam"              # Most common native Steam
-	"$home_dir/.steam"                    # Older native setups
-	# Note: Flatpak Steam is intentionally excluded. Upstream GE-Proton tarballs
-	# include pressure-vessel, which fails inside Flatpak's existing sandbox.
-	# Flatpak users should install GE-Proton via:
-	#   flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
-)
+		"$home_dir/.steam/steam"              # Most common native Steam (symlink)
+		"$home_dir/.local/share/Steam"        # Native Steam's actual data directory
+		"$home_dir/.steam"                    # Older native setups
+		# Flatpak Steam is intentionally excluded. Upstream GE-Proton tarballs
+		# include pressure-vessel, which fails inside Flatpak's existing sandbox.
+	)
 
-for base in "${steam_base_paths[@]}"; do
-	compat_dir="$base/compatibilitytools.d"
-	if [[ -d "$compat_dir" ]]; then
-		echo "$compat_dir"
-		return 0
-	fi
-done
-
-for base in "${steam_base_paths[@]}"; do
-	if [[ -d "$base/steamapps" ]]; then
-		compat_dir="$base/compatibilitytools.d"
-		if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-			sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
-				log "Error: Cannot create $compat_dir as $user" "$RED"
-							exit 1
-						}
-					else
-						mkdir -p "$compat_dir" 2>/dev/null || {
-							log "Error: Cannot create $compat_dir" "$RED"
-													exit 1
-												}
+	for base in "${steam_base_paths[@]}"; do
+		if [[ -d "$base/compatibilitytools.d" ]]; then
+			echo "$base/compatibilitytools.d"
+			return 0
 		fi
-		echo "$compat_dir"
-		return 0
-	fi
-done
+	done
 
-default_base="$home_dir/.steam/steam"
-compat_dir="$default_base/compatibilitytools.d"
-if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-	sudo -u "$user" mkdir -p "$compat_dir" 2>/dev/null || {
-		log "Error: Cannot create $compat_dir as $user" "$RED"
-			exit 1
-		}
-	else
-		mkdir -p "$compat_dir" 2>/dev/null || {
-			log "Error: Cannot create $compat_dir" "$RED"
-					exit 1
+	for base in "${steam_base_paths[@]}"; do
+		if [[ -d "$base/steamapps" ]]; then
+			compat_dir="$base/compatibilitytools.d"
+			if [[ "$DRY_RUN" != "true" ]]; then
+				mkdir -p "$compat_dir" || {
+					log "Error: Cannot create $compat_dir" "$RED"
+					return 2
 				}
-fi
-echo "$compat_dir"
+			fi
+			echo "$compat_dir"
+			return 0
+		fi
+	done
+	return 1
 }
+
+# --- Release lookup ---
 
 # Resolve which GE-Proton build to fetch, as an ordered list of asset-name
 # suffixes to try.
@@ -238,8 +216,6 @@ echo "$compat_dir"
 #      translates x86_64. Set GE_PROTON_ARCH to choose explicitly.
 #
 # Populates the global ARCH_SUFFIXES array (an empty element means "no suffix").
-# Called directly rather than in a command substitution so the array survives;
-# returns 1 to signal a hard error.
 ARCH_SUFFIXES=()
 resolve_arch_suffixes() {
 	local requested="${GE_PROTON_ARCH:-$(uname -m)}"
@@ -259,45 +235,32 @@ resolve_arch_suffixes() {
 	esac
 }
 
-# Function to get latest GE-Proton version and URLs
+# Sets globals: version, tarball_url, checksum_url
 get_latest_release() {
-	local compat_dir_param="$1"  # Pass COMPAT_DIR as parameter
+	local compat_dir_param="$1"
 	local release_info http_code
-	debug_log "Fetching latest release info from GitHub API"
-	debug_log "API URL: $GH_API_URL"
-	debug_log "Temp dir: $TMP_DIR"
+	debug_log "Fetching latest release info from $GH_API_URL"
 
-	http_code=$(curl -s -o "$TMP_DIR/release.json" -w "%{http_code}" "$GH_API_URL" 2>/dev/null) || http_code="000"
+	http_code=$(curl -sS -L --connect-timeout 15 --max-time 60 -o "$TMP_DIR/release.json" \
+		-w "%{http_code}" "$GH_API_URL" 2>/dev/null) || http_code="000"
 	debug_log "HTTP response code: $http_code"
 
-	if [[ ! -f "$TMP_DIR/release.json" ]]; then
-		log "Error: Failed to create release.json file" "$RED"
-		debug_log "Temp directory contents: $(ls -la "$TMP_DIR" 2>&1)"
+	if [[ "$http_code" == "000" ]]; then
+		log "Error: Could not reach the GitHub API (network down or timed out)" "$RED"
 		exit 1
 	fi
-
-	release_info=$(cat "$TMP_DIR/release.json" 2>&1)
-	debug_log "JSON file size: $(wc -c < "$TMP_DIR/release.json" 2>/dev/null || echo "unknown")"
+	release_info=$(cat "$TMP_DIR/release.json" 2>/dev/null || true)
 	debug_log "First 200 chars of response: ${release_info:0:200}"
 
-	if [[ "$http_code" -eq 403 ]]; then
-		log "Error: GitHub API rate limit exceeded" "$RED"
-		debug_log "Full API response: $release_info"
+	if [[ "$http_code" -eq 403 || "$http_code" -eq 429 ]]; then
+		log "Error: GitHub API rate limit exceeded; try again later" "$RED"
 		exit 1
 	elif [[ "$http_code" -ne 200 ]]; then
 		log "Error: GitHub API request failed with HTTP $http_code" "$RED"
-		debug_log "Full API response: $release_info"
 		exit 1
 	fi
 
-	debug_log "Starting JSON parsing"
-
-	# Upstream now ships both x86_64 and aarch64 builds, so a release has two
-	# .tar.gz and two .sha512sum assets. Pull every asset URL once, then pick the
-	# pair whose filenames exactly match this machine's architecture (or
-	# GE_PROTON_ARCH) — "ends with .tar.gz" would (and did) grab both at once.
 	if ! resolve_arch_suffixes; then
-		# Invalid explicit GE_PROTON_ARCH override; message already shown.
 		exit 1
 	fi
 	debug_log "Arch: uname -m=$(uname -m), GE_PROTON_ARCH='${GE_PROTON_ARCH:-<unset>}'"
@@ -306,78 +269,58 @@ get_latest_release() {
 	local asset_urls
 	if command -v jq >/dev/null 2>&1; then
 		debug_log "Using jq for JSON parsing"
-		version=$(echo "$release_info" | jq -r '.tag_name' 2>/dev/null || echo "")
-		asset_urls=$(echo "$release_info" | jq -r '.assets[].browser_download_url' 2>/dev/null || echo "")
+		version=$(jq -r '.tag_name // empty' <<< "$release_info" 2>/dev/null || true)
+		asset_urls=$(jq -r '.assets[].browser_download_url' <<< "$release_info" 2>/dev/null || true)
 	else
-		debug_log "Using grep/cut for JSON parsing"
-		if printf 'x' | grep -qP 'x' 2>/dev/null; then
-			debug_log "Using grep -P (Perl regex)"
-			version=$(echo "$release_info" | grep -oP '"tag_name": "\K[^"]+' 2>/dev/null || echo "")
-			asset_urls=$(echo "$release_info" | grep -oP '"browser_download_url": "\K[^"]+' 2>/dev/null || echo "")
-		else
-			debug_log "Using basic grep"
-			version=$(echo "$release_info" | grep -o '"tag_name": "[^"]*"' 2>/dev/null | head -n1 | cut -d'"' -f4 || echo "")
-			asset_urls=$(echo "$release_info" | grep -o '"browser_download_url": "[^"]*"' 2>/dev/null | cut -d'"' -f4 || echo "")
-		fi
+		debug_log "Using grep for JSON parsing"
+		version=$(grep -o '"tag_name": *"[^"]*"' <<< "$release_info" | head -n1 | cut -d'"' -f4 || true)
+		asset_urls=$(grep -o '"browser_download_url": *"[^"]*"' <<< "$release_info" | cut -d'"' -f4 || true)
 	fi
-
-	debug_log "Parsed version: $version"
-	debug_log "Assets found in release: $(grep -c . <<< "$asset_urls" || true)"
-
-	tarball_url=""
-	checksum_url=""
-	if [[ -n "$version" ]]; then
-		local suffix want_tarball want_checksum candidate_tarball candidate_checksum
-		for suffix in "${ARCH_SUFFIXES[@]}"; do
-			want_tarball="${version}${suffix}.tar.gz"
-			want_checksum="${version}${suffix}.sha512sum"
-			# Leading slash anchors the match to the filename component of the URL,
-			# so the bare "GE-Proton11-5.tar.gz" candidate can't match the suffixed
-			# "GE-Proton11-5-x86_64.tar.gz".
-			candidate_tarball=$(grep -F -- "/$want_tarball" <<< "$asset_urls" | head -n1 || true)
-			candidate_checksum=$(grep -F -- "/$want_checksum" <<< "$asset_urls" | head -n1 || true)
-			if [[ -n "$candidate_tarball" && -n "$candidate_checksum" ]]; then
-				tarball_url="$candidate_tarball"
-				checksum_url="$candidate_checksum"
-				debug_log "Matched asset suffix '${suffix:-<none>}': $want_tarball"
-				break
-			fi
-			debug_log "No complete match for suffix '${suffix:-<none>}' (tarball=${candidate_tarball:-none}, checksum=${candidate_checksum:-none})"
-		done
-	fi
-
-	debug_log "Selected tarball_url: ${tarball_url:-none}"
-	debug_log "Selected checksum_url: ${checksum_url:-none}"
 
 	if [[ -z "$version" ]]; then
 		log "Error: Failed to parse version from GitHub API" "$RED"
 		debug_log "Full API response: $release_info"
 		exit 1
 	fi
+	debug_log "Parsed version: $version"
+	debug_log "Assets found in release: $(grep -c . <<< "$asset_urls" || true)"
 
-	debug_log "Successfully parsed version: $version"
-	debug_log "Checking for assets availability"
+	tarball_url=""
+	checksum_url=""
+	local suffix want_tarball want_checksum candidate_tarball candidate_checksum
+	for suffix in "${ARCH_SUFFIXES[@]}"; do
+		want_tarball="${version}${suffix}.tar.gz"
+		want_checksum="${version}${suffix}.sha512sum"
+		# Leading slash anchors the match to the filename component of the URL,
+		# so the bare "GE-Proton11-5.tar.gz" candidate can't match the suffixed
+		# "GE-Proton11-5-x86_64.tar.gz".
+		candidate_tarball=$(grep -F -- "/$want_tarball" <<< "$asset_urls" | head -n1 || true)
+		candidate_checksum=$(grep -F -- "/$want_checksum" <<< "$asset_urls" | head -n1 || true)
+		if [[ -n "$candidate_tarball" && -n "$candidate_checksum" ]]; then
+			tarball_url="$candidate_tarball"
+			checksum_url="$candidate_checksum"
+			debug_log "Matched asset suffix '${suffix:-<none>}': $want_tarball"
+			break
+		fi
+		debug_log "No complete match for suffix '${suffix:-<none>}'"
+	done
 
-	# Check if assets are available. Distinguish two very different failures:
-	# a release whose assets are still uploading (wait and retry), versus a
-	# release that has assets under names we don't recognize (upstream renamed
-	# something and this script needs a new candidate suffix). Reporting the
-	# second as the first sends you to the releases page to stare at assets that
-	# are plainly right there.
+	# Distinguish a release whose assets are still uploading (wait and retry)
+	# from one whose assets have names we don't recognize (upstream renamed
+	# something and this script needs a new candidate suffix).
 	if [[ -z "$tarball_url" || -z "$checksum_url" ]]; then
-		local any_tarball
+		local any_tarball url
 		any_tarball=$(grep -F -- '.tar.gz' <<< "$asset_urls" | head -n1 || true)
 
 		if [[ -n "$any_tarball" ]]; then
 			log "Error: Release $version has assets, but none match the expected names for this architecture" "$RED"
-			local suffix
 			for suffix in "${ARCH_SUFFIXES[@]}"; do
 				log "  Looked for: ${version}${suffix}.tar.gz + ${version}${suffix}.sha512sum" "$YELLOW"
 			done
 			log "  Assets actually present:" "$YELLOW"
 			while IFS= read -r url; do
 				[[ -z "$url" ]] && continue
-				log "    $(basename "$url")" "$YELLOW"
+				log "    ${url##*/}" "$YELLOW"
 			done <<< "$asset_urls"
 			log "Upstream has likely renamed their release assets; this script needs updating." "$RED"
 			exit 1
@@ -386,16 +329,9 @@ get_latest_release() {
 		log "Warning: Latest release ($version) doesn't have binary assets available yet" "$YELLOW"
 		log "This usually happens when a release is just published but assets are still being uploaded" "$YELLOW"
 		log "Please try again in a few minutes, or check: https://github.com/GloriousEggroll/proton-ge-custom/releases/latest" "$YELLOW"
-
-		debug_log "Checking if version already installed in: $compat_dir_param"
-		# Check if we already have this version installed via state file
-		if [[ -n "$compat_dir_param" && -f "$compat_dir_param/$LATEST_DIR/$VERSION_FILE" ]]; then
-			local installed_version
-			installed_version=$(cat "$compat_dir_param/$LATEST_DIR/$VERSION_FILE" 2>/dev/null || echo "")
-			if [[ "$installed_version" == "$version" ]]; then
-				log "$version is already installed as $LATEST_DISPLAY_PREFIX, nothing to do" "$GREEN"
-				exit 0
-			fi
+		if [[ "$(read_installed_version "$compat_dir_param/$LATEST_DIR")" == "$version" ]]; then
+			log "$version is already installed as $LATEST_DISPLAY_PREFIX, nothing to do" "$GREEN"
+			exit 0
 		fi
 		log "Assets not available for download yet, exiting" "$RED"
 		exit 1
@@ -404,93 +340,57 @@ get_latest_release() {
 	log "Latest version: $version" "$NC"
 	debug_log "Tarball URL: $tarball_url"
 	debug_log "Checksum URL: $checksum_url"
-	debug_log "get_latest_release function completed successfully"
 }
 
-# Function to download and verify
+# --- Download and install ---
+
+# Downloads the tarball and checksum into TMP_DIR and verifies them.
 download_and_verify() {
-	local tarball_name checksum_name
-	tarball_name=$(basename "$tarball_url")
-	checksum_name=$(basename "$checksum_url")
+	local tarball_name="${tarball_url##*/}" checksum_name="${checksum_url##*/}"
+	local -a progress=(-sS)
+	# A progress bar only on a terminal; under cron it would be thousands of lines.
+	if [[ -t 2 ]]; then
+		progress=(--progress-bar)
+	fi
 
 	log "Downloading $tarball_name..." "$NC"
-	debug_log "Download location: $TMP_DIR/$tarball_name"
-
-	if command -v wget >/dev/null 2>&1; then
-		debug_log "Using wget for download"
-		wget -q --show-progress -O "$TMP_DIR/$tarball_name" "$tarball_url" || {
-			log "Error: Download failed with wget" "$RED"
-					if [[ "$DEBUG" -eq 1 ]]; then
-						wget -O "$TMP_DIR/$tarball_name" "$tarball_url"
-					fi
-					exit 1
-				}
-				wget -q -O "$TMP_DIR/$checksum_name" "$checksum_url" || {
-					log "Error: Checksum download failed with wget" "$RED"
-									exit 1
-								}
-							else
-								debug_log "Using curl for download"
-								curl -s -L "$tarball_url" -o "$TMP_DIR/$tarball_name" || {
-									log "Error: Download failed with curl" "$RED"
-																	if [[ "$DEBUG" -eq 1 ]]; then
-																		curl -v -L "$tarball_url" -o "$TMP_DIR/$tarball_name"
-																	fi
-																	exit 1
-																}
-																curl -s -L "$checksum_url" -o "$TMP_DIR/$checksum_name" || {
-																	log "Error: Checksum download failed with curl" "$RED"
-																																	exit 1
-																																}
-	fi
-
-	if [[ ! -s "$TMP_DIR/$tarball_name" ]]; then
-		log "Error: Downloaded tarball is empty or not found at $TMP_DIR/$tarball_name" "$RED"
+	curl -fL "${CURL_NET[@]}" "${progress[@]}" -o "$TMP_DIR/$tarball_name" "$tarball_url" || {
+		log "Error: Download of $tarball_name failed" "$RED"
 		exit 1
-	fi
-
-	if [[ ! -s "$TMP_DIR/$checksum_name" ]]; then
-		log "Error: Downloaded checksum file is empty or not found at $TMP_DIR/$checksum_name" "$RED"
+	}
+	curl -fsSL "${CURL_NET[@]}" -o "$TMP_DIR/$checksum_name" "$checksum_url" || {
+		log "Error: Download of $checksum_name failed" "$RED"
 		exit 1
-	fi
+	}
 
 	log "Verifying checksum..." "$NC"
-	cd "$TMP_DIR"
-	debug_log "Checksum file content: $(cat "$checksum_name")"
-	debug_log "Calculated SHA512: $(sha512sum "$tarball_name")"
-
-	if sha512sum -c "$checksum_name" >/dev/null 2>&1; then
+	debug_log "Checksum file content: $(cat "$TMP_DIR/$checksum_name")"
+	if (cd "$TMP_DIR" && sha512sum -c "$checksum_name" >/dev/null 2>&1); then
 		log "Checksum verification passed" "$GREEN"
 	else
 		log "Error: Checksum verification failed" "$RED"
-		debug_log "Expected vs actual:"
 		if [[ "$DEBUG" -eq 1 ]]; then
-			sha512sum -c "$checksum_name" || true
+			(cd "$TMP_DIR" && sha512sum -c "$checksum_name") || true
 		fi
 		exit 1
 	fi
-
-	debug_log "Tarball exists after verification: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
-	echo "$tarball_name"
+	TARBALL_PATH="$TMP_DIR/$tarball_name"
 }
 
-# Function to read the installed version from a state file
 read_installed_version() {
 	local dir="$1"
 	if [[ -f "$dir/$VERSION_FILE" ]]; then
-		cat "$dir/$VERSION_FILE" 2>/dev/null || echo ""
-	else
-		echo ""
+		cat "$dir/$VERSION_FILE" 2>/dev/null || true
 	fi
 }
 
-# Function to write a compatibilitytool.vdf with custom names
+# Writes a compatibilitytool.vdf with custom names
 write_vdf() {
 	local target_dir="$1" internal_name="$2" display_name="$3"
 	local vdf_path="$target_dir/compatibilitytool.vdf"
 
 	debug_log "Writing VDF: internal=$internal_name display=$display_name path=$vdf_path"
-
+	rm -f "$vdf_path"
 	cat > "$vdf_path" <<VDFEOF
 "compatibilitytools"
 {
@@ -512,174 +412,91 @@ write_vdf() {
 
       "from_oslist"  "windows"
       "to_oslist"    "linux"
-}
-}
+    }
+  }
 }
 VDFEOF
 }
 
-# Function to install GE-Proton with static naming and version rotation
+# Installs GE-Proton with static naming and version rotation.
 install_ge_proton() {
-	local user="$1" target_dir="$2" tarball_name="$3" version="$4"
+	local target_dir="$1" version="$2"
 	local latest_path="$target_dir/$LATEST_DIR"
 	local previous_path="$target_dir/$PREVIOUS_DIR"
 
-	debug_log "Creating target directory: $target_dir"
-	mkdir -p "$target_dir" 2>/dev/null || {
-		log "Error: Cannot create $target_dir" "$RED"
-			exit 1
-		}
+	# Extract into a staging directory on the SAME filesystem as the target,
+	# BEFORE any rotation: a failed or interrupted extraction never touches the
+	# existing Latest/Previous, and the final swap is a rename.
+	find "$target_dir" -mindepth 1 -maxdepth 1 -name "${STAGING_PREFIX}.*" -exec rm -rf {} + 2>/dev/null || true
+	STAGING_DIR="$target_dir/${STAGING_PREFIX}.$$"
+	mkdir -p "$STAGING_DIR" || {
+		log "Error: Cannot create staging directory $STAGING_DIR" "$RED"
+		exit 1
+	}
 
-		local tarball_path="$TMP_DIR/$tarball_name"
-		debug_log "Checking tarball before extraction: $tarball_path"
-		debug_log "Tarball details: $(ls -lh "$tarball_path" 2>/dev/null || echo 'Not found')"
-		if [[ ! -s "$tarball_path" ]]; then
-			log "Error: Tarball not found or empty at $tarball_path" "$RED"
-			exit 1
-		fi
+	log "Extracting $version to $LATEST_DIR..." "$NC"
+	# The checksum already proved the tarball is exactly what upstream published,
+	# so a single extraction pass is all the reading it needs.
+	local extract_output
+	extract_output=$(tar -xzf "$TARBALL_PATH" -C "$STAGING_DIR" 2>&1) || {
+		log "Error: Extraction failed" "$RED"
+		debug_log "Extraction output: $extract_output"
+		exit 1
+	}
 
-		local tarball_size
-		tarball_size=$(stat -c%s "$tarball_path" 2>/dev/null ||
-			stat -f%z "$tarball_path" 2>/dev/null ||
-			wc -c < "$tarball_path")
-					debug_log "Tarball size: $tarball_size bytes"
-
-					if [[ "$tarball_size" -lt 1000000 ]]; then
-						log "Warning: Tarball size ($tarball_size bytes) seems unusually small" "$YELLOW"
-					fi
-
-					debug_log "Testing tarball integrity"
-					tar -tzf "$tarball_path" >/dev/null 2>&1 || {
-						log "Error: Tarball integrity check failed" "$RED"
-											debug_log "Trying with verbose output: tar -tvzf $tarball_path"
-											if [[ "$DEBUG" -eq 1 ]]; then
-												tar -tvzf "$tarball_path" || true
-											fi
-											exit 1
-										}
-
-	# --- Determine the tarball's top-level directory up front ---
-	# Detect it from the tarball itself rather than assuming it equals the
-	# version tag — arch-suffixed builds (e.g. aarch64) use a different internal
-	# directory name. Read the full listing (no early-exit pipe) and take the
-	# first path component.
-	local tar_listing extracted_top
-	tar_listing=$(tar -tzf "$tarball_path" 2>/dev/null || true)
-	extracted_top="${tar_listing%%/*}"
-	if [[ -z "$extracted_top" || "$extracted_top" == "." ]]; then
-		extracted_top="$version"
+	# The tarball holds a single top-level directory; its name differs between
+	# architectures, so take whatever was extracted rather than assuming it.
+	local -a extracted=()
+	mapfile -t extracted < <(find "$STAGING_DIR" -mindepth 1 -maxdepth 1)
+	if [[ "${#extracted[@]}" -ne 1 || ! -d "${extracted[0]}" ]]; then
+		log "Error: Expected one top-level directory in the tarball, found ${#extracted[@]} entries" "$RED"
+		exit 1
 	fi
-	debug_log "Tarball top-level directory: $extracted_top"
+	local staged_path="${extracted[0]}"
+	debug_log "Tarball top-level directory: ${staged_path##*/}"
 
-	# Run filesystem ops as the target user when we're root acting on someone
-	# else's Steam dir (empty prefix otherwise). Passing args through an array
-	# avoids the shell-quoting/injection hazards of building a wrapper script.
-	local run_as=()
-	if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
-		run_as=(sudo -u "$user")
+	local file_count
+	file_count=$(find "$staged_path" -type f | wc -l)
+	debug_log "Files extracted: $file_count"
+	if [[ "$file_count" -lt "$MIN_FILES" ]]; then
+		log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
 	fi
 
-	# --- Extract into a staging dir on the SAME filesystem as the target ---
-	# Extracting BEFORE any rotation means a failed or interrupted extraction
-	# never destroys the existing Latest/Previous. The final swap is then a
-	# same-filesystem rename.
-	local staging_dir="$target_dir/.ge-proton-staging.$$"
-	debug_log "Staging directory: $staging_dir"
-	rm -rf "$staging_dir" 2>/dev/null || true  # clear any stale staging from an interrupted run
-	"${run_as[@]}" mkdir -p "$staging_dir" 2>/dev/null || {
-		log "Error: Cannot create staging directory $staging_dir" "$RED"
-			exit 1
-		}
-
-		log "Extracting $version to $LATEST_DIR..." "$NC"
-		debug_log "Extract: tar -xzf $tarball_path -C $staging_dir (as $user)"
-		local extract_output
-		extract_output=$("${run_as[@]}" tar -xzf "$tarball_path" -C "$staging_dir" 2>&1) || {
-			log "Error: Extraction failed${user:+ as user $user}" "$RED"
-					debug_log "Extraction output: $extract_output"
-					rm -rf "$staging_dir" 2>/dev/null || true
-					exit 1
-				}
-
-				local staged_path="$staging_dir/$extracted_top"
-				if [[ ! -d "$staged_path" ]]; then
-					log "Error: Expected extracted directory $staged_path not found" "$RED"
-					debug_log "Staging contents: $(ls -la "$staging_dir" 2>&1)"
-					rm -rf "$staging_dir" 2>/dev/null || true
-					exit 1
-				fi
-
-				local file_count
-				file_count=$(find "$staged_path" -type f | wc -l)
-				debug_log "Files extracted: $file_count"
-				if [[ "$file_count" -lt "$MIN_FILES" ]]; then
-					log "Warning: Extraction produced fewer files than expected ($file_count < $MIN_FILES)" "$YELLOW"
-				fi
-
-	# --- Now that a good build is staged, rotate Latest → Previous ---
+	# Now that a good build is staged, rotate Latest → Previous
 	local current_latest_version
 	current_latest_version=$(read_installed_version "$latest_path")
 	debug_log "Current Latest version: ${current_latest_version:-none}"
 
 	if [[ -d "$latest_path" && -n "$current_latest_version" ]]; then
 		log "Rotating $LATEST_DIR ($current_latest_version) → $PREVIOUS_DIR..." "$NC"
-
-		if [[ -d "$previous_path" ]]; then
-			local previous_version
-			previous_version=$(read_installed_version "$previous_path")
-			debug_log "Removing existing Previous (${previous_version:-unknown})"
-			rm -rf "$previous_path" 2>/dev/null || {
-				log "Warning: Failed to remove $previous_path" "$YELLOW"
-			}
+		if [[ -e "$previous_path" ]]; then
+			rm -rf "$previous_path" || log "Warning: Failed to remove $previous_path" "$YELLOW"
 		fi
-
-		mv "$latest_path" "$previous_path" 2>/dev/null || {
+		mv "$latest_path" "$previous_path" || {
 			log "Error: Failed to rotate $LATEST_DIR → $PREVIOUS_DIR" "$RED"
-					rm -rf "$staging_dir" 2>/dev/null || true
-					exit 1
-				}
-
-				write_vdf "$previous_path" "$PREVIOUS_INTERNAL" "$PREVIOUS_DISPLAY_PREFIX"
-				if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-					chown "$user:$user" "$previous_path/compatibilitytool.vdf" 2>/dev/null || true
-				fi
-
-				log "Previous version: $current_latest_version" "$GREEN"
-			else
-				# No usable Latest to rotate; clear any stale/partial Latest so the swap
-				# below creates a clean directory instead of nesting inside it.
-				rm -rf "$latest_path" 2>/dev/null || true
-	fi
-
-	# --- Swap the staged build into place (same-filesystem rename) ---
-	debug_log "Moving $staged_path → $latest_path"
-	mv "$staged_path" "$latest_path" 2>/dev/null || {
-		log "Error: Failed to move staged build into $latest_path" "$RED"
-			rm -rf "$staging_dir" 2>/dev/null || true
 			exit 1
 		}
-		rm -rf "$staging_dir" 2>/dev/null || true
-
-	# Fix ownership of the new Latest if running as root for another user
-	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-		chown -R "$user:$user" "$latest_path" 2>/dev/null || {
-			log "Warning: Failed to set ownership of $latest_path to $user" "$YELLOW"
-		}
+		write_vdf "$previous_path" "$PREVIOUS_INTERNAL" "$PREVIOUS_DISPLAY_PREFIX"
+		log "Previous version: $current_latest_version" "$GREEN"
+	else
+		# No usable Latest to rotate; clear any stale/partial Latest so the swap
+		# below creates a clean directory instead of nesting inside it.
+		rm -rf "$latest_path"
 	fi
 
-	# --- Write VDF and state file ---
-	write_vdf "$latest_path" "$LATEST_INTERNAL" "$LATEST_DISPLAY_PREFIX"
-	debug_log "Wrote VDF: internal=$LATEST_INTERNAL display=$LATEST_DISPLAY_PREFIX"
+	# Swap the staged build into place (same-filesystem rename)
+	mv "$staged_path" "$latest_path" || {
+		log "Error: Failed to move staged build into $latest_path" "$RED"
+		exit 1
+	}
+	rm -rf "$STAGING_DIR"
+	STAGING_DIR=""
 
+	write_vdf "$latest_path" "$LATEST_INTERNAL" "$LATEST_DISPLAY_PREFIX"
 	echo "$version" > "$latest_path/$VERSION_FILE"
 	debug_log "Wrote version state file: $version"
 
-	if [[ "$EUID" -eq 0 && "$user" != "root" ]]; then
-		chown "$user:$user" "$latest_path/compatibilitytool.vdf" "$latest_path/$VERSION_FILE" 2>/dev/null || true
-	fi
-
 	log "$version installed as '$LATEST_DISPLAY_PREFIX'!" "$GREEN"
-
 	if [[ -z "$current_latest_version" ]]; then
 		log "==> Note: Steam requires a restart for the initial setup of $LATEST_DISPLAY_PREFIX." "$GREEN"
 		log "In Steam: Steam > Settings > Compatibility > Set 'Default compatibility tool' to '$LATEST_DISPLAY_PREFIX'." "$GREEN"
@@ -687,196 +504,193 @@ install_ge_proton() {
 	else
 		log "==> Updated in-place. No Steam restart required." "$GREEN"
 	fi
-
-	return 0
 }
 
-# Function to clean up legacy versioned GE-Proton directories
-cleanup_legacy_versions() {
-	local user="$1" target_dir="$2"
-	local found_legacy=0
+# --- Legacy cleanup ---
 
-	debug_log "Scanning for legacy versioned GE-Proton directories..."
+# Internal tool names Steam currently has games (or the default) mapped to.
+# Returns 1 if Steam's config can't be read.
+mapped_compat_tools() {
+	local config="$1/config/config.vdf"
+	[[ -r "$config" ]] || return 1
+	awk '
+		/"CompatToolMapping"/ { inmap = 1; depth = 0; next }
+		inmap && /\{/ { depth++ }
+		inmap && /\}/ { depth--; if (depth <= 0) inmap = 0 }
+		inmap && match($0, /"name"[[:space:]]+"[^"]*"/) {
+			s = substr($0, RSTART, RLENGTH)
+			sub(/^"name"[[:space:]]+"/, "", s); sub(/"$/, "", s)
+			if (s != "") print s
+		}
+	' "$config"
+}
+
+# Internal name declared in a tool directory's compatibilitytool.vdf
+tool_internal_name() {
+	awk '
+		/"compat_tools"/ { found = 1; next }
+		found && match($0, /"[^"]+"/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+	' "$1/compatibilitytool.vdf" 2>/dev/null || true
+}
+
+# Older versions of this script installed every release into its own versioned
+# directory (GE-Proton10-27, ...). On the move to GE-Proton-Latest those are
+# removed once. Tools installed by ProtonUp-Qt or by hand use the same naming,
+# so anything a game or the default is still mapped to in Steam is kept, and if
+# Steam's config can't be read nothing is removed at all.
+cleanup_legacy_versions() {
+	local target_dir="$1" dir name internal m in_use
+	local -a legacy=() mapped=()
 
 	while IFS= read -r dir; do
-		[[ -z "$dir" ]] && continue
-		local dirname
-		dirname=$(basename "$dir")
+		name="${dir##*/}"
+		if [[ "$name" =~ ^GE-Proton[0-9] ]]; then
+			legacy+=("$dir")
+		fi
+	done < <(find "$target_dir" -mindepth 1 -maxdepth 1 -type d -name 'GE-Proton*' 2>/dev/null | LC_ALL=C sort)
 
-		# Skip our managed static directories
-		if [[ "$dirname" == "$LATEST_DIR" || "$dirname" == "$PREVIOUS_DIR" ]]; then
+	if [[ "${#legacy[@]}" -eq 0 ]]; then
+		debug_log "No legacy versioned directories found."
+		return 0
+	fi
+	if [[ ! -r "$(dirname "$target_dir")/config/config.vdf" ]]; then
+		log "Leaving older GE-Proton versions in place (couldn't read Steam's config to see which are in use):" "$YELLOW"
+		for dir in "${legacy[@]}"; do log "  ${dir##*/}" "$YELLOW"; done
+		return 0
+	fi
+	mapfile -t mapped < <(mapped_compat_tools "$(dirname "$target_dir")" || true)
+
+	for dir in "${legacy[@]}"; do
+		name="${dir##*/}"
+		internal=$(tool_internal_name "$dir")
+		in_use=false
+		for m in "${mapped[@]}"; do
+			if [[ "$m" == "$name" || "$m" == "${internal:-$name}" ]]; then
+				in_use=true
+				break
+			fi
+		done
+		if [[ "$in_use" == "true" ]]; then
+			log "Keeping $name (selected for a game or as the default in Steam)" "$NC"
 			continue
 		fi
-
-		# Match legacy versioned directories (e.g., GE-Proton10-30, GE-Proton9-27)
-		if [[ "$dirname" =~ ^GE-Proton[0-9] ]]; then
-			if [[ "$found_legacy" -eq 0 ]]; then
-				log "Cleaning up legacy GE-Proton directories..." "$NC"
-				found_legacy=1
-			fi
-			log "Removing legacy $dirname..." "$NC"
-			if [[ "$user" != "root" && "$EUID" -eq 0 ]]; then
-				sudo -u "$user" rm -rf "$dir" 2>/dev/null || {
-					log "Warning: Failed to remove $dir" "$YELLOW"
-				}
-			else
-				rm -rf "$dir" 2>/dev/null || {
-					log "Warning: Failed to remove $dir" "$YELLOW"
-				}
-			fi
+		if [[ "$DRY_RUN" == "true" ]]; then
+			log "[DRY-RUN] Would remove older version $name" "$NC"
+		else
+			log "Removing older version $name..." "$NC"
+			rm -rf "$dir" || log "Warning: Failed to remove $dir" "$YELLOW"
 		fi
-	done < <(find "$target_dir" -maxdepth 1 -type d -name 'GE-Proton*' 2>/dev/null)
-
-	if [[ "$found_legacy" -eq 1 ]]; then
-		log "Legacy cleanup complete." "$NC"
-	else
-		debug_log "No legacy versioned directories found."
-	fi
+	done
 }
 
-# Check for flags
-FORCE_ROOT=0
+# --- Main ---
+
 for arg in "$@"; do
-	if [[ "$arg" == "--force-root" ]]; then
-		FORCE_ROOT=1
-	elif [[ "$arg" == "--debug" ]]; then
-		DEBUG=1
-	elif [[ "$arg" == "--dry-run" ]]; then
-		IS_DRY_RUN=true
-	fi
+	case "$arg" in
+		--force-root) FORCE_ROOT=1 ;;
+		--debug) DEBUG=1 ;;
+		--dry-run) DRY_RUN=true ;;
+		--help|-h) show_help; exit 0 ;;
+		*) log "Warning: Ignoring unknown argument '$arg'" "$YELLOW" ;;
+	esac
 done
 
-# Print system info in debug mode
 if [[ "$DEBUG" -eq 1 ]]; then
 	debug_log "System info: $(uname -a)"
-	debug_log "Current user: $(whoami)"
-	debug_log "EUID: $EUID"
-	if [[ -v SUDO_USER ]]; then
-		debug_log "SUDO_USER: $SUDO_USER"
-	fi
+	debug_log "Running as: $(id -un) (EUID $EUID), SUDO_USER=${SUDO_USER:-<unset>}"
 fi
 
-# Main execution
-log "Checking for GE-Proton updates..." "$NC"
-
-EFFECTIVE_USER=$(get_effective_user)
-debug_log "Effective user: $EFFECTIVE_USER"
-
-# Infer the target user, passing GE_PROTON_TARGET only if set, otherwise an empty string
-TARGET_USER=$(infer_target_user "${GE_PROTON_TARGET:-}" "$EFFECTIVE_USER")
-debug_log "Target user for installation: $TARGET_USER"
-
-TARGET_SET=0
-if [[ -v GE_PROTON_TARGET && -n "${GE_PROTON_TARGET}" ]]; then
-	if [[ -d "$GE_PROTON_TARGET" || -w "$(dirname "$GE_PROTON_TARGET")" ]]; then
-		COMPAT_DIR="$GE_PROTON_TARGET"
-		TARGET_SET=1
-		log "Using overridden Steam directory: $COMPAT_DIR" "$NC"
-	else
-		# If running as root, try to fix permissions or error out
-		if [[ "$EUID" -eq 0 ]]; then
-			if [[ "$TARGET_USER" != "root" ]]; then
-				sudo -u "$TARGET_USER" mkdir -p "$GE_PROTON_TARGET" 2>/dev/null || {
-					log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable even as $TARGET_USER" "$RED"
-									exit 1
-								}
-								COMPAT_DIR="$GE_PROTON_TARGET"
-								TARGET_SET=1
-								log "Created and using overridden Steam directory: $COMPAT_DIR" "$NC"
-							else
-								log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable for root" "$RED"
-								exit 1
-			fi
-		else
-			log "Error: GE_PROTON_TARGET ($GE_PROTON_TARGET) is invalid or unwritable" "$RED"
-			exit 1
-		fi
-	fi
+if [[ -n "${GE_PROTON_TARGET:-}" && "$GE_PROTON_TARGET" != /* ]]; then
+	log "Error: GE_PROTON_TARGET must be an absolute path (got '$GE_PROTON_TARGET')" "$RED"
+	exit 1
 fi
 
-if [[ "$TARGET_SET" -eq 0 && "$EFFECTIVE_USER" == "root" && "$EUID" -eq 0 && ! -v SUDO_USER ]]; then
-	if [[ "$FORCE_ROOT" -eq 1 ]]; then
+# As root, work out whose Steam directory this is and become that user first.
+if [[ "$EUID" -eq 0 ]]; then
+	if [[ -n "${GE_PROTON_TARGET:-}" ]]; then
+		OWNER=$(path_controller "$GE_PROTON_TARGET")
+	elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+		OWNER="$SUDO_USER"
+	elif [[ "$FORCE_ROOT" -eq 1 ]]; then
+		OWNER=root
 		log "Installing to root's Steam dir with --force-root" "$NC"
 	else
-		log "Skipping GE-Proton update: Running as root without sudo user, --force-root, or valid GE_PROTON_TARGET" "$RED"
+		log "Skipping GE-Proton update: running as root with no sudo user, GE_PROTON_TARGET, or --force-root" "$YELLOW"
 		exit 0
+	fi
+	if [[ "$OWNER" != "root" ]]; then
+		drop_privileges "$OWNER" "$@"
 	fi
 fi
 
-if [[ "$TARGET_SET" -eq 0 ]]; then
-	COMPAT_DIR=$(find_steam_dir "$TARGET_USER")
+log "Checking for GE-Proton updates..." "$NC"
+
+if [[ -n "${GE_PROTON_TARGET:-}" ]]; then
+	COMPAT_DIR="$GE_PROTON_TARGET"
+	log "Using overridden Steam directory: $COMPAT_DIR" "$NC"
+	if [[ ! -d "$COMPAT_DIR" && "$DRY_RUN" != "true" ]]; then
+		mkdir -p "$COMPAT_DIR" || {
+			log "Error: Cannot create $COMPAT_DIR as $(id -un)" "$RED"
+			exit 1
+		}
+	fi
+else
+	rc=0
+	COMPAT_DIR=$(find_steam_dir) || rc=$?
+	if [[ "$rc" -eq 2 ]]; then
+		exit 1
+	elif [[ "$rc" -ne 0 ]]; then
+		home_dir=$(getent passwd "$(id -un)" | cut -d: -f6) || home_dir="${HOME:-}"
+		if [[ -d "$home_dir/.var/app/com.valvesoftware.Steam" ]]; then
+			log "Only Flatpak Steam found for $(id -un). This script can't install into it; use:" "$YELLOW"
+			log "  flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE" "$YELLOW"
+		else
+			log "No native Steam installation found for $(id -un); nothing to do." "$NC"
+		fi
+		exit 0
+	fi
 	log "Using Steam directory: $COMPAT_DIR" "$NC"
-	debug_log "Target directory access check: $(ls -la "$COMPAT_DIR" 2>&1 || echo "Cannot access")"
 fi
 
-# Ensure the target directory is owned by the target user if running as root
-if [[ "$EUID" -eq 0 && "$TARGET_USER" != "root" ]]; then
-	chown "$TARGET_USER:$TARGET_USER" "$COMPAT_DIR" 2>/dev/null || {
-		log "Warning: Failed to set ownership of $COMPAT_DIR to $TARGET_USER" "$RED"
-	}
+if [[ -d "$COMPAT_DIR" && "$DRY_RUN" != "true" && ! -w "$COMPAT_DIR" ]]; then
+	log "Error: $COMPAT_DIR isn't writable by $(id -un) (owned by $(stat -c %U "$COMPAT_DIR"))" "$RED"
+	log "Fix with: sudo chown -R $(id -un): $COMPAT_DIR" "$RED"
+	exit 1
 fi
 
-TMP_DIR=$(make_secure_temp)
+TMP_BASE="${TMPDIR:-/tmp}"
+if [[ ! -d "$TMP_BASE" || ! -w "$TMP_BASE" ]]; then
+	debug_log "TMPDIR $TMP_BASE isn't writable, using /tmp"
+	TMP_BASE=/tmp
+fi
+TMP_DIR=$(mktemp -d "$TMP_BASE/ge-proton-update.XXXXXX")
+STAGING_DIR=""
+trap 'rm -rf "$TMP_DIR"; if [[ -n "$STAGING_DIR" ]]; then rm -rf "$STAGING_DIR"; fi' EXIT
 debug_log "Using temp directory: $TMP_DIR"
-
-# Install cleanup trap right after creation so the temp dir can't leak if any
-# of the setup below fails.
-trap 'rm -rf "$TMP_DIR" && debug_log "Cleanup: Removed temp directory" || log "Warning: Failed to clean up $TMP_DIR" "$RED"' EXIT
-
-if [[ "$EUID" -eq 0 && "$TARGET_USER" != "root" ]]; then
-	debug_log "Setting permissions on temp directory for $TARGET_USER"
-	chown "$TARGET_USER:$TARGET_USER" "$TMP_DIR" || {
-		log "Warning: Failed to set ownership of temp directory to $TARGET_USER" "$RED"
-			debug_log "Current temp dir permissions: $(ls -la "$TMP_DIR")"
-		}
-		chmod 700 "$TMP_DIR" || {
-			log "Warning: Failed to set permissions on temp directory" "$RED"
-		}
-fi
 
 get_latest_release "$COMPAT_DIR"
 
-# Check installed version via state file instead of directory name
 INSTALLED_VERSION=$(read_installed_version "$COMPAT_DIR/$LATEST_DIR")
 debug_log "Installed version (from state file): ${INSTALLED_VERSION:-none}"
 
 if [[ "$INSTALLED_VERSION" == "$version" ]]; then
 	log "$version already installed as $LATEST_DISPLAY_PREFIX" "$NC"
-	INSTALL_NEEDED=0
-else
-	INSTALL_NEEDED=1
-	if [[ -n "$INSTALLED_VERSION" ]]; then
-		debug_log "Version change detected: $INSTALLED_VERSION → $version"
-	else
-		debug_log "No existing installation found, fresh install needed"
-	fi
-fi
-
-if [[ "$INSTALL_NEEDED" -eq 1 ]]; then
-	if [[ "${IS_DRY_RUN:-false}" == "true" ]]; then
-		if [[ -n "$INSTALLED_VERSION" ]]; then
-			log "[DRY-RUN] Would update GE-Proton: $INSTALLED_VERSION → $version" "$NC"
-		else
-			log "[DRY-RUN] Would install GE-Proton $version (first install)" "$NC"
-		fi
-	else
-		tarball_name=$(download_and_verify)
-		debug_log "Tarball name returned: $tarball_name"
-		debug_log "Full tarball path: $TMP_DIR/$tarball_name"
-		debug_log "Tarball check before install: $(ls -lh "$TMP_DIR/$tarball_name" 2>/dev/null || echo 'Not found')"
-		install_ge_proton "$TARGET_USER" "$COMPAT_DIR" "$tarball_name" "$version"
-	fi
-else
 	log "No update needed." "$NC"
-fi
-
-# Clean up any legacy versioned directories from older script behavior
-if [[ "${IS_DRY_RUN:-false}" == "true" ]]; then
-	log "[DRY-RUN] Would clean up legacy GE-Proton directories" "$NC"
+elif [[ "$DRY_RUN" == "true" ]]; then
+	if [[ -n "$INSTALLED_VERSION" ]]; then
+		log "[DRY-RUN] Would update GE-Proton: $INSTALLED_VERSION → $version" "$NC"
+	else
+		log "[DRY-RUN] Would install GE-Proton $version (first install)" "$NC"
+		cleanup_legacy_versions "$COMPAT_DIR"
+	fi
 else
-	cleanup_legacy_versions "$TARGET_USER" "$COMPAT_DIR"
+	download_and_verify
+	install_ge_proton "$COMPAT_DIR" "$version"
+	# One-time move from the old one-directory-per-version layout.
+	if [[ -z "$INSTALLED_VERSION" ]]; then
+		cleanup_legacy_versions "$COMPAT_DIR"
+	fi
 fi
 
 log "Done!" "$NC"
-
 exit 0
